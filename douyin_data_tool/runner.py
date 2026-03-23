@@ -30,8 +30,10 @@ def meets_conditions(video):
     days_ago = (now - video_time).days
     if days_ago > FILTER_MAX_DAYS:
         return False
-    like_count = video.get("like", 0)
-    comment_count = video.get("comment", 0)
+    # 修复：API返回的是 digg_count 而非 like
+    statistics = video.get("statistics", {})
+    like_count = statistics.get("digg_count", 0)
+    comment_count = statistics.get("comment_count", 0)
     if like_count < FILTER_MIN_LIKE or comment_count < FILTER_MIN_COMMENT:
         return False
     return True

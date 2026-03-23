@@ -17,10 +17,12 @@ from typing import List, Dict, Any
 from datetime import datetime
 
 # 修复 Windows 控制台编码问题
-if sys.platform == "win32":
+if sys.platform == "win32" and hasattr(sys.stdout, 'buffer'):
     import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    if not isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    if not isinstance(sys.stderr, io.TextIOWrapper):
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # 添加路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -32,19 +34,22 @@ from collector.parser import (
     extract_hashtags,
     extract_keywords
 )
-from config import HEADERS
+from config import HEADERS, FILTER_MAX_DAYS, FILTER_MIN_LIKE, FILTER_MIN_COMMENT, USER_IDS
 
 
 class DouyinUserFetcher:
     """抖音用户视频抓取器"""
-    
-    def __init__(self, max_videos: int = 100):
+
+    def __init__(self, max_videos: int = 100, enable_filter: bool = True):
         """
         Args:
             max_videos: 最多抓取视频数
+            enable_filter: 是否启用过滤条件（使用 config.py 中的 FILTER_* 配置）
         """
         self.max_videos = max_videos
+        self.enable_filter = enable_filter
         self.collected = []
+        self.filtered_count = 0  # 被过滤掉的视频数量
         
     def fetch_from_url(self, user_url: str) -> List[Dict[str, Any]]:
         """
@@ -128,10 +133,51 @@ class DouyinUserFetcher:
             max_cursor = data.get("max_cursor", 0)
         
         return all_videos[:self.max_videos]
+
+    def meets_conditions(self, video: Dict) -> bool:
+        """
+        检查视频是否满足过滤条件
+
+        Args:
+            video: 原始视频数据
+
+        Returns:
+            bool: True 表示保留，False 表示过滤
+        """
+        if not self.enable_filter:
+            return True
+
+        create_time = video.get("create_time", 0)
+        if not create_time:
+            return False
+
+        # 检查发布时间
+        from datetime import datetime, timedelta
+        video_time = datetime.fromtimestamp(create_time)
+        now = datetime.now()
+        days_ago = (now - video_time).days
+
+        if days_ago > FILTER_MAX_DAYS:
+            return False
+
+        # 检查互动数据
+        statistics = video.get("statistics", {})
+        like_count = statistics.get("digg_count", 0)
+        comment_count = statistics.get("comment_count", 0)
+
+        if like_count < FILTER_MIN_LIKE or comment_count < FILTER_MIN_COMMENT:
+            return False
+
+        return True
     
     def _parse_videos(self, raw_videos: List[Dict]):
         """解析视频数据"""
         for item in raw_videos:
+            # 先检查是否满足过滤条件
+            if not self.meets_conditions(item):
+                self.filtered_count += 1
+                continue
+
             desc = item.get("desc", "")
             
             # 提取话题标签
@@ -184,24 +230,29 @@ class DouyinUserFetcher:
         if not self.collected:
             print("   暂无数据")
             return
-        
+
         # 统计标签
         all_tags = []
         for v in self.collected:
             all_tags.extend(v["hashtags"])
-        
+
         tag_counter = {}
         for tag in all_tags:
             tag_counter[tag] = tag_counter.get(tag, 0) + 1
-        
+
         top_tags = sorted(tag_counter.items(), key=lambda x: x[1], reverse=True)[:10]
-        
+
         # 统计互动
         total_likes = sum(v["like_count"] for v in self.collected)
         total_comments = sum(v["comment_count"] for v in self.collected)
         total_shares = sum(v["share_count"] for v in self.collected)
-        
+
         print(f"   📊 视频总数: {len(self.collected)}")
+
+        if self.enable_filter:
+            print(f"   🚫 已过滤: {self.filtered_count} 个视频（不满足条件）")
+            print(f"   📋 过滤条件: {FILTER_MAX_DAYS}天内, {FILTER_MIN_LIKE}+点赞, {FILTER_MIN_COMMENT}+评论")
+
         print(f"   👍 总点赞数: {total_likes:,}")
         print(f"   💬 总评论数: {total_comments:,}")
         print(f"   🔄 总分享数: {total_shares:,}")
@@ -264,17 +315,43 @@ class DouyinUserFetcher:
 
 def main():
     parser = argparse.ArgumentParser(description="抓取抖音用户视频文案和标签")
-    parser.add_argument("url", help="用户主页URL")
+    parser.add_argument("url", nargs='?', help="用户主页URL（不填则使用 config.py 中的 USER_IDS）")
     parser.add_argument("--max", "-n", type=int, default=100, help="最多抓取视频数 (默认100)")
     parser.add_argument("--output", "-o", choices=["json", "csv", "both", "none"], default="both",
                        help="输出格式 (默认both)")
     parser.add_argument("--top", "-t", type=int, default=10, help="显示热门视频数 (默认10)")
-    
+    parser.add_argument("--no-filter", action="store_true", help="禁用过滤条件（抓取所有视频）")
+
     args = parser.parse_args()
-    
+
+    # 确定 URL
+    urls = []
+    if args.url:
+        urls.append(args.url)
+    elif USER_IDS:
+        # 使用 config.py 中的 USER_IDS
+        for user_id in USER_IDS:
+            # 检查是否已经是完整 URL
+            if user_id.startswith("http"):
+                urls.append(user_id)
+            else:
+                urls.append(f"https://www.douyin.com/user/{user_id}")
+        print(f"使用 config.py 中配置的 {len(USER_IDS)} 个用户ID")
+    else:
+        parser.error("请提供用户主页URL，或在 config.py 中配置 USER_IDS")
+
     # 执行抓取
-    fetcher = DouyinUserFetcher(max_videos=args.max)
-    fetcher.fetch_from_url(args.url)
+    fetcher = DouyinUserFetcher(max_videos=args.max, enable_filter=not args.no_filter)
+
+    all_results = []
+    for url in urls:
+        print(f"\n正在抓取: {url}")
+        results = fetcher.fetch_from_url(url)
+        if results:
+            all_results.extend(results)
+
+    # 更新 fetcher 的结果为所有抓取的数据
+    fetcher.collected = all_results
     
     # 输出结果
     if args.output in ["json", "both"]:

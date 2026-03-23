@@ -8,20 +8,13 @@
 
 import os
 import sys
-import io
 from pathlib import Path
 from typing import Literal, List, Dict, Any
 
-# 修复编码
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-
-from dotenv import load_dotenv
-from zai import ZhipuAiClient
 from openai import OpenAI
 
-load_dotenv('.env')
+# 导入统一配置
+from config import LLMModel, Paths
 
 
 class ScriptGenerator:
@@ -37,25 +30,21 @@ class ScriptGenerator:
 
     def _init_client(self):
         """初始化客户端"""
-        if self.model == "zhipu":
-            api_key = os.getenv("ZAI_API_KEY")
-            if not api_key:
-                raise ValueError("请设置 ZAI_API_KEY")
-            self.client = ZhipuAiClient(api_key=api_key)
-            self.model_name = "glm-4.7-flash"
-        else:  # deepseek
-            api_key = os.getenv("DEEPSEEK_API_KEY")
-            if not api_key:
-                raise ValueError("请设置 DEEPSEEK_API_KEY")
-            self.client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
-            self.model_name = "deepseek-chat"
+        config = LLMModel.get_model_config(self.model)
+
+        self.client = OpenAI(
+            api_key=config["api_key"](),
+            base_url=config["base_url"]
+        )
+        self.model_name = config["model"]
 
     def generate_for_tts(
         self,
         reference_script: str,
         hashtags: List[str],
         topic: str,
-        style: str = "自嘲幽默"
+        style: str = "自嘲幽默",
+        target_duration: float = 20.0
     ) -> Dict[str, Any]:
         """
         生成文案：TTS朗读用 + 平台发布用
@@ -65,6 +54,7 @@ class ScriptGenerator:
             hashtags: 话题标签
             topic: 新主题
             style: 文案风格
+            target_duration: 目标时长（秒），默认20秒
 
         Returns:
             Dict: {
@@ -73,15 +63,22 @@ class ScriptGenerator:
                 "segments": ["分段1", "分段2", ...],
                 "tts_script": "带停顿标记的台词",
                 "estimated_duration": 预估时长(秒),
-                
+                "target_duration": 目标时长(秒),
+
                 # 平台发布用
                 "short_script": "带标签的短文案，用于作品描述",
                 "publish_text": "完整的发布文案（标题+描述+标签）",
-                
+
                 # 通用
                 "suggested_tags": ["标签1", "标签2"]
             }
         """
+        # 根据目标时长计算字数要求（正常语速约3-3.5字/秒）
+        target_words = int(target_duration * 3.5)
+        target_words_min = int(target_duration * 3)
+        # 按每段8-12字计算需要的段数
+        min_segments = max(4, target_words_min // 12)  # 至少4段
+        max_segments = target_words_min // 8 + 2  # 按最短每段8字计算
         tags_str = " ".join(hashtags) if hashtags else ""
 
         prompt = f"""你是短视频文案创作专家，需要同时生成两种文案。
@@ -104,18 +101,27 @@ class ScriptGenerator:
 - 表达: 短句为主，善用反问和感叹
 - 口语化: 用"呢、吧、啊、哦"等语气词
 
+【目标时长】
+{target_duration}秒（TTS完整台词需要约{target_words_min}-{target_words}字）
+
 【要求 - 生成两种文案】
 
 **文案1：TTS朗读用（电子音/数字人）- 重点关注节奏和连贯性**
 1. 口语化表达，避免生僻字
 2. 每句话8-15个字，确保一口气能说完
 3. 段落间必须有明显停顿（用...或换行表示）
-4. 总长度控制在60-90字（约18-25秒）
-5. 保持自嘲幽默风格
-6. 重要：句子之间用标点符号明确分隔，确保TTS正确断句
+4. **完整版字数必须达到{target_words_min}-{target_words}字**（硬性要求！用于生成{target_duration}秒的语音）
+5. **分成{min_segments}-{max_segments}个短句**
+6. 必须是完整的叙事结构：
+   * 开头：钩子吸引注意力（1-2句）
+   * 中间：情节展开，有起伏（{min_segments-4}到{max_segments-4}句）
+   * 结尾：记忆点或互动引导（1-2句）
+7. 保持自嘲幽默风格
+8. 重要：句子之间用标点符号明确分隔，确保TTS正确断句
+9. 内容要充实，不能空洞重复
 
 **文案2：平台发布用（作品描述+引流）**
-1. 短小精悍，50-80字
+1. 短小精悍，200字
 2. 吸引眼球的标题/开头
 3. 文末附5-8个话题标签（#格式）
 4. 包含引导互动（关注、点赞等）
@@ -125,10 +131,12 @@ class ScriptGenerator:
 按以下JSON格式返回：
 {{
     "segments": ["第一段", "第二段", "第三段"],
-    "full_script": "完整文案",
+    "full_script": "完整文案（必须达到{target_words_min}字以上）",
     "short_script": "短文案用于发布 #标签1 #标签2",
     "suggested_tags": ["#标签1", "#标签2", "#标签3"]
 }}
+
+⚠️ **再次强调："full_script"必须是{target_words_min}-{target_words}字的长篇内容，用于生成{target_duration}秒的语音！**
 
 直接返回JSON，不要其他内容："""
 
@@ -185,6 +193,7 @@ class ScriptGenerator:
                 "segments": segments,
                 "tts_script": tts_script,
                 "estimated_duration": round(estimated_duration, 1),
+                "target_duration": target_duration,
                 # 平台发布用
                 "short_script": short_script,
                 "publish_text": publish_text,
@@ -480,7 +489,8 @@ def interactive_mode():
 def generate_script(
     topic: str,
     reference: str = "",
-    model: str = "deepseek"
+    model: str = "deepseek",
+    target_duration: float = 20.0
 ) -> Dict[str, Any]:
     """
     快速生成文案
@@ -489,7 +499,8 @@ def generate_script(
         result = generate_script(
             topic="律师如何应对奇葩客户",
             reference="杭州老律师月入500待客之道",
-            model="deepseek"  # 或 "zhipu"
+            model="deepseek",  # 或 "zhipu"
+            target_duration=30.0  # 30秒视频
         )
         # TTS/数字人用
         print(result["full_script"])
@@ -502,7 +513,7 @@ def generate_script(
         reference = "杭州老律师月入500待客之道 #律师的真实日常#vlog日常"
 
     generator = ScriptGenerator(model=model)
-    return generator.generate_for_tts(reference, [], topic)
+    return generator.generate_for_tts(reference, [], topic, target_duration=target_duration)
 
 
 def generate_tts_script(

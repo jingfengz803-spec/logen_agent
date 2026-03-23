@@ -11,14 +11,26 @@ from pathlib import Path
 from typing import Optional, Literal
 import json
 
-# 修复 Windows 控制台编码
-if sys.platform == "win32":
+# 修复 Windows 控制台编码（只执行一次）
+if sys.platform == "win32" and not isinstance(sys.stdout, io.TextIOWrapper):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-# 加载 .env 文件
+# 加载 .env 文件（从项目根目录）
 from dotenv import load_dotenv
-load_dotenv('.env')
+# 尝试从多个位置加载 .env
+env_paths = [
+    Path(__file__).parent.parent / '.env',  # 项目根目录
+    Path(__file__).parent / '.env',          # 当前目录
+]
+loaded = False
+for env_path in env_paths:
+    if env_path.exists():
+        load_dotenv(env_path)
+        loaded = True
+        break
+if not loaded:
+    load_dotenv()  # 尝试从环境变量或默认位置加载
 
 import dashscope
 from dashscope.audio.tts_v2 import VoiceEnrollmentService, SpeechSynthesizer
@@ -139,12 +151,67 @@ class CosyVoiceTTSClient:
         service = VoiceEnrollmentService()
         return service.query_voice(voice_id=voice_id)
 
+    def list_voices(self, prefix=None, page_index: int = 0, page_size: int = 10) -> list:
+        """
+        查询已创建的所有音色（使用官方 API）
+
+        Args:
+            prefix: 音色自定义前缀，仅允许数字和小写字母，长度小于10个字符
+            page_index: 查询的页索引
+            page_size: 查询页大小
+
+        Returns:
+            list: 音色信息列表，格式为：
+                  [{'gmt_create': '2025-10-09 14:51:01',
+                    'gmt_modified': '2025-10-09 14:51:07',
+                    'status': 'OK',
+                    'voice_id': 'cosyvoice-v3-myvoice-xxx'}]
+
+            音色状态有三种：
+                DEPLOYING： 审核中
+                OK：审核通过，可调用
+                UNDEPLOYED：审核不通过，不可调用
+        """
+        service = VoiceEnrollmentService()
+        return service.list_voices(prefix=prefix, page_index=page_index, page_size=page_size)
+
+    def get_ready_voices(self) -> list:
+        """
+        获取所有状态为 OK 的音色 ID
+
+        Returns:
+            list: 可用的音色 ID 列表
+        """
+        voices = self.list_voices()
+        return [v["voice_id"] for v in voices if v["status"] == "OK"]
+
+    def print_voices_status(self, prefix=None, page_index: int = 0, page_size: int = 10):
+        """打印所有音色的状态"""
+        voices = self.list_voices(prefix=prefix, page_index=page_index, page_size=page_size)
+
+        if not voices:
+            print("  暂无音色，请先创建音色")
+            return
+
+        print("\n  音色列表:")
+        print("  " + "-" * 80)
+        for v in voices:
+            status_icon = "✓" if v["status"] == "OK" else "⏳" if v["status"] == "DEPLOYING" else "❌"
+            voice_id = v.get('voice_id', 'N/A')
+            status = v.get('status', 'UNKNOWN')
+            gmt_create = v.get('gmt_create', 'N/A')
+            gmt_modified = v.get('gmt_modified', 'N/A')
+            print(f"  {status_icon} {voice_id}")
+            print(f"     状态: {status}, 创建时间: {gmt_create}, 修改时间: {gmt_modified}")
+        print("  " + "-" * 80)
+
     def speech(
         self,
         text: str,
         voice: str,
         model: Optional[str] = None,
-        output_path: Optional[str] = None
+        output_path: Optional[str] = None,
+        max_retries: int = 6  # 增加重试次数以应对 WebSocket 连接超时
     ) -> bytes:
         """
         使用复刻音色进行语音合成
@@ -152,34 +219,130 @@ class CosyVoiceTTSClient:
         Args:
             text: 要转换的文本
             voice: 音色 ID（通过 create_voice 创建）
-            model: 模型名称，默认使用 DEFAULT_MODEL
+            model: 模型名称，默认从 voice_id 自动推断
             output_path: 保存路径，如不指定则只返回音频数据
+            max_retries: 最大重试次数（应对网络超时）
 
         Returns:
-            bytes: 音频数据
+            bytes: 音频数据（如果指定了output_path，则返回文件路径字符串）
         """
-        model = model or self.DEFAULT_MODEL
+        # 如果没有指定 model，尝试从 voice_id 中推断
+        if model is None:
+            # voice_id 格式分析:
+            # - cosyvoice-v1-xxx
+            # - cosyvoice-v2-xxx
+            # - cosyvoice-v3-flash-xxx
+            # - cosyvoice-v3-plus-xxx
+            # - cosyvoice-v3.5-flash-xxx
+            # - cosyvoice-v3.5-plus-xxx
+            if voice.startswith('cosyvoice-v1'):
+                model = 'cosyvoice-v1'
+            elif voice.startswith('cosyvoice-v2'):
+                model = 'cosyvoice-v2'
+            elif voice.startswith('cosyvoice-v3-flash'):
+                model = 'cosyvoice-v3-flash'
+            elif voice.startswith('cosyvoice-v3-plus'):
+                model = 'cosyvoice-v3-plus'
+            elif voice.startswith('cosyvoice-v3.5-flash'):
+                model = 'cosyvoice-v3.5-flash'
+            elif voice.startswith('cosyvoice-v3.5-plus'):
+                model = 'cosyvoice-v3.5-plus'
+            else:
+                model = self.DEFAULT_MODEL
+
+        # 确保模型名始终是小写（Dashscope API 要求）
+        model = model.lower() if model else self.DEFAULT_MODEL
+
+        # 调试：打印推断的模型名（输出到 stderr 以便被日志捕获）
+        # import sys
+        # print(f"[DEBUG] speech() 推断的 model: '{model}', type: {type(model)}", file=sys.stderr, flush=True)
 
         # 清理文本
         clean_text = self._clean_text(text)
 
-        try:
-            synthesizer = SpeechSynthesizer(model=model, voice=voice)
-            audio_data = synthesizer.call(clean_text)
+        # 重试机制处理 WebSocket 连接超时
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                # 调试：打印 model 值（输出到 stderr 以便被日志捕获）
+                # import sys
+                # print(f"[DEBUG] speech() 调用参数: model={model}, voice={voice[:30]}... (尝试 {attempt + 1}/{max_retries})", file=sys.stderr, flush=True)
 
-            print(f"✓ 语音合成成功，Request ID: {synthesizer.get_last_request_id()}")
+                # 创建 SpeechSynthesizer 实例
+                synthesizer = SpeechSynthesizer(model=model, voice=voice)
 
-            # 保存到文件
-            if output_path:
-                Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(output_path, "wb") as f:
-                    f.write(audio_data)
-                print(f"✓ 音频已保存到: {output_path}")
+                # 修复 SDK 可能存在的模型名转换问题
+                # Dashscope SDK 可能会将模型名转换为首字母大写，需要强制使用小写
+                import json
 
-            return audio_data
+                original_getStartRequest = synthesizer.request.getStartRequest
 
-        except Exception as e:
-            raise Exception(f"语音合成失败: {e}")
+                def patched_getStartRequest(additional_params=None):
+                    # 调用原始方法
+                    request_json = original_getStartRequest(additional_params)
+                    # 修改 JSON 中的模型名为小写
+                    request_data = json.loads(request_json)
+                    request_data['payload']['model'] = model
+                    return json.dumps(request_data)
+
+                synthesizer.request.getStartRequest = patched_getStartRequest
+
+                # 同样修复 getContinueRequest
+                original_getContinueRequest = synthesizer.request.getContinueRequest
+
+                def patched_getContinueRequest(text):
+                    request_json = original_getContinueRequest(text)
+                    request_data = json.loads(request_json)
+                    request_data['payload']['model'] = model
+                    return json.dumps(request_data)
+
+                synthesizer.request.getContinueRequest = patched_getContinueRequest
+
+                # 修复 getFinishRequest（如果存在）
+                if hasattr(synthesizer.request, 'getFinishRequest'):
+                    original_getFinishRequest = synthesizer.request.getFinishRequest
+
+                    def patched_getFinishRequest():
+                        request_json = original_getFinishRequest()
+                        request_data = json.loads(request_json)
+                        request_data['payload']['model'] = model
+                        return json.dumps(request_data)
+
+                    synthesizer.request.getFinishRequest = patched_getFinishRequest
+
+                # print(f"[DEBUG] 已应用 monkey-patch 修复模型名", file=sys.stderr, flush=True)
+                # print(f"[DEBUG] SpeechSynthesizer.model={synthesizer.model}", file=sys.stderr, flush=True)
+                audio_data = synthesizer.call(clean_text)
+
+                # 验证返回的音频数据
+                if audio_data is None:
+                    raise Exception(f"API返回了空数据。可能原因：1) 音色ID '{voice}' 无效 2) 文本不符合要求")
+
+                if len(audio_data) == 0:
+                    raise Exception(f"API返回了空音频（0字节）。可能原因：1) 音色ID '{voice}' 无效或不可用 2) 文本问题")
+
+                print(f"✓ 语音合成成功，Request ID: {synthesizer.get_last_request_id()}, 音频大小: {len(audio_data)} bytes")
+
+                # 保存到文件
+                if output_path:
+                    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                    with open(output_path, "wb") as f:
+                        f.write(audio_data)
+                    print(f"✓ 音频已保存到: {output_path}")
+                    return output_path  # 返回文件路径
+
+                return audio_data
+
+            except Exception as e:
+                last_error = e
+                error_msg = str(e)
+                # 如果是 WebSocket 超时错误，且不是最后一次尝试，则立即重试
+                if ("websocket" in error_msg.lower() and "timeout" in error_msg.lower()) or "could not established" in error_msg.lower():
+                    if attempt < max_retries - 1:
+                        print(f"⚠ WebSocket 连接超时，立即重试 ({attempt + 1}/{max_retries})...")
+                        continue
+                # 其他错误或最后一次尝试，直接抛出
+                raise Exception(f"语音合成失败: {e}")
 
     def speech_from_segments(
         self,

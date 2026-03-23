@@ -1,12 +1,8 @@
-# 罗根智能体 - Git忽略文件
+# ============================================
+# Python 项目 .gitignore
+# ============================================
 
-# ==================== 环境变量和配置 ====================
-.env
-.env.local
-.env.*.local
-config.local.py
-
-# ==================== Python ====================
+# ------------------- Python -------------------
 __pycache__/
 *.py[cod]
 *$py.class
@@ -24,20 +20,17 @@ parts/
 sdist/
 var/
 wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
 
-# ==================== 虚拟环境 ====================
+# ------------------- 虚拟环境 -------------------
 venv/
-ENV/
 env/
+ENV/
 .venv
 
-# ==================== IDE ====================
+# ------------------- IDE -------------------
 .idea/
 .vscode/
 *.swp
@@ -45,46 +38,45 @@ env/
 *~
 .DS_Store
 
-# ==================== Jupyter Notebook ====================
-.ipynb_checkpoints
-*.ipynb
+# ------------------- 环境变量 & 敏感信息 -------------------
+.env
+.env.local
+*.key
+secrets/
 
-# ==================== 测试和覆盖率 ====================
+# ------------------- 数据文件 -------------------
+*.json
+*.csv
+*.xlsx
+!requirements.txt
+!package.json
+!.env.example
+
+# 允许的配置文件示例
+longgraph/.env.example
+
+# ------------------- 日志 -------------------
+*.log
+logs/
+
+# ------------------- 输出文件 -------------------
+douyin_data_tool/output/
+longgraph/data/output/
+longgraph/data/audio/
+*.wav
+*.mp3
+*.mp4
+*.avi
+
+# ------------------- 临时文件 -------------------
+nul
+*.tmp
+*.bak
+*.cache
 .pytest_cache/
 .coverage
 htmlcov/
-.tox/
-.nox/
 
-# ==================== 数据文件 ====================
-*.csv
-*.json
-*.xlsx
-data/
-logs/
-outputs/
-audio/
-videos/
-models/
-
-# 保留示例数据
-!douyin_data.csv.example
-
-# ==================== 模型文件 ====================
-*.pth
-*.pt
-*.ckpt
-*.bin
-*.safetensors
-checkpoints/
-
-# ==================== 临时文件 ====================
-*.tmp
-*.bak
-*.log
-*.cache
-
-# ==================== 系统文件 ====================
+# ------------------- OS -------------------
 Thumbs.db
 Desktop.ini
-.DS_Store
