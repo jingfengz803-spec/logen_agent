@@ -20,13 +20,15 @@ sys.path.insert(0, str(BASE_DIR))
 from core.config import settings
 from core.logger import logger, get_logger
 from core.task_manager import task_manager
+from database import Database  # 添加数据库导入
 
 # 导入中间件
 from middleware.cors import CorsMiddleware, LoggingMiddleware, TimingMiddleware, ErrorHandlingMiddleware
+from middleware.auth import AuthMiddleware
 from middleware.error_handler import setup_exception_handlers
 
 # 导入API路由
-from api.v1 import douyin, ai, tts, video, workflow, storage
+from api.v1 import douyin, ai, tts, video, storage, users, chain, resources
 
 # 获取日志器
 app_logger = get_logger("app")
@@ -41,8 +43,73 @@ async def lifespan(app: FastAPI):
     app_logger.info(f"🔧 调试模式: {settings.DEBUG}")
 
     # 确保必要的目录存在
-    settings.OUTPUT_DIR.mkdir(exist_ok=True)
-    settings.TEMP_DIR.mkdir(exist_ok=True)
+    settings.output_dir_path.mkdir(parents=True, exist_ok=True)
+    settings.temp_dir_path.mkdir(parents=True, exist_ok=True)
+    settings.audio_dir_path.mkdir(parents=True, exist_ok=True)
+    Path(settings.LOG_DIR).mkdir(parents=True, exist_ok=True)
+
+    # 初始化数据库（如果配置了 MySQL）
+    db_enabled = False
+    try:
+        from database import init_database
+        from models.db import init_tables
+        from dao.user_dao import UserDAO
+        from dao.douyin_dao import DouyinDAO
+        from dao.task_dao import TaskDAO
+        from dao.resource_dao import ResourceDAO
+
+        if init_database():
+            # 创建所有表
+            init_tables()
+            DouyinDAO.init_table()  # 抖音表
+            TaskDAO.init_table()      # 任务表（已在 models/db.py 定义）
+            ResourceDAO.init_table()  # 资源表
+
+            # 从数据库加载任务
+            task_manager.load_from_db()
+
+            # 确保默认用户存在
+            if Database.is_connected():
+                from dao.user_dao import UserDAO
+                UserDAO.ensure_default_users()
+                _migrate_orphan_data()
+
+            db_enabled = True
+            app_logger.info("✅ MySQL 数据库已启用")
+        else:
+            app_logger.info("⚠️ MySQL 未配置，使用 JSON 文件存储")
+    except ImportError as e:
+        app_logger.info(f"⚠️ 数据库模块未安装: {e}，使用降级模式")
+    except Exception as e:
+        app_logger.warning(f"⚠️ 数据库初始化失败: {e}，使用降级模式")
+
+    # 如果启用了数据库，同步现有 JSON 数据
+    if db_enabled:
+        try:
+            from dao.task_dao import TaskDAO
+            from dao.user_dao import UserDAO  # 添加 UserDAO 导入
+            import json
+
+            # 同步 tasks.json 到数据库
+            tasks_file = settings.temp_dir_path / "tasks.json"
+            if tasks_file.exists():
+                with open(tasks_file, "r", encoding="utf-8") as f:
+                    tasks_data = json.load(f)
+
+                # 构建用户映射（从数据库获取）
+                user_map = {}
+                for task_data in tasks_data.values():
+                    user_id = task_data.get("user_id")
+                    if user_id:
+                        # 获取数据库 ID
+                        user = UserDAO.get_by_user_id(user_id)
+                        if user:
+                            user_map[user_id] = user.id
+
+                TaskDAO.sync_from_json(str(tasks_file), user_map)
+                app_logger.info(f"✅ 同步了 {len(tasks_data)} 个任务到数据库")
+        except Exception as e:
+            app_logger.warning(f"同步任务数据失败: {e}")
 
     yield
 
@@ -50,6 +117,45 @@ async def lifespan(app: FastAPI):
     app_logger.info("👋 服务关闭中...")
     # 清理旧任务
     task_manager.cleanup_old_tasks()
+
+
+def _migrate_orphan_data():
+    """创建系统用户并迁移无归属的旧数据"""
+    from database import db, Database
+    from dao.user_dao import UserDAO
+
+    # 1. 创建系统用户
+    system_user = UserDAO.get_by_user_id("user_system")
+    if not system_user:
+        sql = """
+            INSERT INTO users (user_id, username, role, status)
+            VALUES ('user_system', 'system', 'admin', 1)
+        """
+        try:
+            db.execute(sql, skip_user_filter=True)
+            app_logger.info("✅ 创建系统用户完成")
+            system_user = UserDAO.get_by_user_id("user_system")
+        except Exception as e:
+            app_logger.warning(f"创建系统用户失败: {e}")
+            return
+
+    if not system_user:
+        return
+
+    system_db_id = system_user.id
+
+    # 2. 迁移旧数据
+    tables = ["tasks", "generated_resources", "douyin_fetch_tasks", "douyin_videos"]
+    for table in tables:
+        try:
+            check_sql = f"SELECT COUNT(*) as cnt FROM {table} WHERE user_id IS NULL"
+            row = db.fetch_one(check_sql, skip_user_filter=True)
+            if row and row["cnt"] > 0:
+                migrate_sql = f"UPDATE {table} SET user_id = %s WHERE user_id IS NULL"
+                affected = db.execute(migrate_sql, (system_db_id,))
+                app_logger.info(f"✅ 迁移 {table}: {affected} 条数据归属到系统用户")
+        except Exception as e:
+            app_logger.debug(f"迁移 {table} 跳过: {e}")
 
 
 def create_app() -> FastAPI:
@@ -64,6 +170,28 @@ def create_app() -> FastAPI:
         redoc_url="/redoc" if settings.DEBUG else None,
     )
 
+    # 自定义 OpenAPI schema，添加 API Key 认证
+    # 保存原始的 openapi 方法避免递归
+    original_openapi = app.openapi
+
+    def custom_openapi():
+        if app.openapi_schema:
+            return app.openapi_schema
+        openapi_schema = original_openapi()
+        # 添加安全方案
+        openapi_schema["components"]["securitySchemes"] = {
+            "ApiKeyAuth": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-API-Key",
+                "description": "API 认证密钥，通过 /api/v1/users/create 创建用户获取"
+            }
+        }
+        app.openapi_schema = openapi_schema
+        return openapi_schema
+
+    app.openapi = custom_openapi
+
     # 配置CORS
     CorsMiddleware.setup_cors(app)
 
@@ -71,6 +199,7 @@ def create_app() -> FastAPI:
     app.add_middleware(LoggingMiddleware)
     app.add_middleware(TimingMiddleware)
     app.add_middleware(ErrorHandlingMiddleware)
+    app.add_middleware(AuthMiddleware)
 
     # 配置异常处理
     setup_exception_handlers(app)
@@ -124,11 +253,22 @@ def _setup_routes(app: FastAPI):
         prefix=settings.API_PREFIX,
     )
     app.include_router(
-        workflow.router,
+        storage.router,
         prefix=settings.API_PREFIX,
     )
+    # V1: 用户管理路由（不需要鉴权）
     app.include_router(
-        storage.router,
+        users.router,
+        prefix=settings.API_PREFIX,
+    )
+    # 任务串联路由
+    app.include_router(
+        chain.router,
+        prefix=settings.API_PREFIX,
+    )
+    # 资源管理路由
+    app.include_router(
+        resources.router,
         prefix=settings.API_PREFIX,
     )
 
