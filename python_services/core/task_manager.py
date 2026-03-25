@@ -1,18 +1,16 @@
 """
 异步任务管理器
 管理长时间运行的任务（如视频生成、数据抓取等）
-支持任务持久化到文件
+使用MySQL数据库进行任务持久化
 """
 
 import asyncio
 import uuid
-import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Callable, Awaitable
 from enum import Enum
 from dataclasses import dataclass, field
 from collections import defaultdict
-from pathlib import Path
 
 from .logger import get_logger
 
@@ -40,6 +38,7 @@ class Task:
     created_at: datetime = field(default_factory=datetime.utcnow)
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    user_id: Optional[str] = None  # 用户ID，用于数据隔离
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -53,45 +52,50 @@ class Task:
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "user_id": self.user_id,
         }
 
 
 class TaskManager:
-    """任务管理器（支持持久化）"""
+    """任务管理器（使用MySQL持久化）"""
 
-    def __init__(self, max_concurrent: int = 5, persist_file: Optional[str] = None):
+    def __init__(self, max_concurrent: int = 5):
         self.max_concurrent = max_concurrent
         self.tasks: Dict[str, Task] = {}
         self.tasks_by_type: Dict[str, Dict[str, Task]] = defaultdict(dict)
         self.running_tasks: set = set()
         self._lock = asyncio.Lock()
-        self._persist_file = Path(persist_file) if persist_file else None
 
-        # 启动时加载已保存的任务
-        if self._persist_file:
-            self._load_tasks()
+        # 启动时从数据库加载任务（如果数据库已连接）
+        self._load_tasks_from_db()
 
-    def create_task(self, task_type: str, params: Optional[Dict[str, Any]] = None) -> str:
+    def load_from_db(self) -> int:
         """
-        创建新任务
-
-        Args:
-            task_type: 任务类型
-            params: 任务参数
+        手动从数据库加载任务（数据库初始化后调用）
 
         Returns:
-            任务ID
+            加载的任务数量
         """
+        return self._load_tasks_from_db(silent=False)
+
+    def create_task(self, task_type: str, params: Optional[Dict[str, Any]] = None) -> str:
+        """创建新任务（自动关联当前用户）"""
+        from database import Database
+
         task_id = str(uuid.uuid4())
+        user_db_id = Database.get_current_user_id()
+
         task = Task(
             task_id=task_id,
-            task_type=task_type
+            task_type=task_type,
+            user_id=str(user_db_id) if user_db_id else None
         )
 
         self.tasks[task_id] = task
         self.tasks_by_type[task_type][task_id] = task
+        self._save_task_to_db(task, params)
 
-        logger.info(f"创建任务: {task_type} - {task_id}")
+        logger.info(f"创建任务: {task_type} - {task_id} (用户: {user_db_id})")
         return task_id
 
     async def submit_task(
@@ -120,6 +124,9 @@ class TaskManager:
             task.status = TaskStatus.RUNNING
             task.started_at = datetime.utcnow()
 
+            # 更新数据库状态
+            self._update_task_status_in_db(task_id, "running")
+
         try:
             # 执行任务 - coro 是一个可调用对象，需要先调用获取协程
             result = await coro()
@@ -127,19 +134,26 @@ class TaskManager:
             task.status = TaskStatus.SUCCESS
             task.progress = 100
             logger.info(f"任务完成: {task_id}")
+
+            # 更新数据库
+            self._update_task_complete_in_db(task_id, result=result)
+
+            # 自动保存生成的资源到资源表
+            if result and task.task_type in ["chain_tts", "chain_tts_from_analysis", "chain_video", "tts_speech", "video_generate"]:
+                self._save_resources_from_task(task_id, task.task_type, result)
         except Exception as e:
             task.status = TaskStatus.FAILED
             task.error = str(e)
             logger.error(f"任务失败: {task_id} - {e}")
+            # 更新数据库
+            self._update_task_complete_in_db(task_id, error=str(e))
         finally:
             async with self._lock:
                 self.running_tasks.discard(task_id)
                 task.completed_at = datetime.utcnow()
-            # 任务状态变更后保存
-            self._save_tasks()
 
     def get_task(self, task_id: str) -> Optional[Task]:
-        """获取任务"""
+        """获取任务（Database 层自动过滤）"""
         return self.tasks.get(task_id)
 
     def get_tasks_by_type(self, task_type: str) -> list[Task]:
@@ -153,6 +167,8 @@ class TaskManager:
             task.progress = min(100, max(0, progress))
             if message:
                 logger.info(f"任务进度: {task_id} - {progress}% - {message}")
+            # 更新数据库进度
+            self._update_task_progress_in_db(task_id, progress)
 
     def cancel_task(self, task_id: str) -> bool:
         """取消任务"""
@@ -162,64 +178,213 @@ class TaskManager:
             self.running_tasks.discard(task_id)
             task.completed_at = datetime.utcnow()
             logger.info(f"任务已取消: {task_id}")
-            self._save_tasks()
+            # 更新数据库
+            self._update_task_complete_in_db(task_id, status="cancelled")
             return True
         return False
 
-    def _save_tasks(self) -> None:
-        """保存任务到文件"""
-        if not self._persist_file:
-            return
+    def _load_tasks_from_db(self, silent: bool = True) -> int:
+        """
+        从数据库加载任务
 
+        Args:
+            silent: 是否静默模式（不显示警告）
+
+        Returns:
+            加载的任务数量
+        """
+        count = 0
         try:
-            self._persist_file.parent.mkdir(parents=True, exist_ok=True)
-            data = {
-                task_id: task.to_dict()
-                for task_id, task in self.tasks.items()
-            }
-            with open(self._persist_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.warning(f"保存任务失败: {e}")
+            from database import db
+            if not db.is_connected():
+                if not silent:
+                    logger.warning("数据库未连接，跳过任务加载")
+                return 0
 
-    def _load_tasks(self) -> None:
-        """从文件加载任务"""
-        if not self._persist_file or not self._persist_file.exists():
-            return
+            # 只加载最近的任务（避免内存占用过大）
+            sql = """
+                SELECT task_id, task_type, status, progress, result, error,
+                       created_at, started_at, completed_at
+                FROM tasks
+                WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                ORDER BY created_at DESC
+            """
+            import json
+            rows = db.fetch_all(sql)
 
-        try:
-            with open(self._persist_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            for task_id, task_data in data.items():
+            for row in rows:
                 task = Task(
-                    task_id=task_data["task_id"],
-                    task_type=task_data["task_type"]
+                    task_id=row["task_id"],
+                    task_type=row["task_type"]
                 )
-                task.status = TaskStatus(task_data["status"])
-                task.progress = task_data.get("progress", 0)
-                task.result = task_data.get("result")
-                task.error = task_data.get("error")
-                task.created_at = datetime.fromisoformat(task_data["created_at"])
-                task.started_at = datetime.fromisoformat(task_data["started_at"]) if task_data.get("started_at") else None
-                task.completed_at = datetime.fromisoformat(task_data["completed_at"]) if task_data.get("completed_at") else None
+                task.status = TaskStatus(row["status"])
+                task.progress = row.get("progress", 0)
 
-                self.tasks[task_id] = task
-                self.tasks_by_type[task.task_type][task_id] = task
+                # 解析JSON字段
+                if row.get("result"):
+                    if isinstance(row["result"], str):
+                        task.result = json.loads(row["result"])
+                    else:
+                        task.result = row["result"]
+
+                task.error = row.get("error")
+                task.created_at = row["created_at"]
+                task.started_at = row.get("started_at")
+                task.completed_at = row.get("completed_at")
+
+                self.tasks[task.task_id] = task
+                self.tasks_by_type[task.task_type][task.task_id] = task
 
                 # 如果任务是运行中状态，恢复为待处理（服务重启后需要重新执行）
                 if task.status == TaskStatus.RUNNING:
                     task.status = TaskStatus.PENDING
                     task.started_at = None
 
-            logger.info(f"从文件加载了 {len(self.tasks)} 个任务")
+                count += 1
+
+            logger.info(f"从数据库加载了 {count} 个任务")
         except Exception as e:
-            logger.warning(f"加载任务失败: {e}")
+            if not silent:
+                logger.warning(f"从数据库加载任务失败: {e}")
+
+        return count
+
+    def _save_task_to_db(self, task: Task, params: Optional[Dict[str, Any]] = None) -> None:
+        """保存任务到数据库"""
+        try:
+            from database import db, Database
+            if not db.is_connected():
+                return
+
+            import json
+            user_db_id = Database.get_current_user_id()
+
+            sql = """
+                INSERT INTO tasks (task_id, user_id, task_type, status, progress, input_params)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE status = VALUES(status)
+            """
+            db.execute(sql, (
+                task.task_id,
+                user_db_id,
+                task.task_type,
+                task.status.value,
+                task.progress,
+                json.dumps(params, ensure_ascii=False) if params else None
+            ))
+        except Exception as e:
+            logger.warning(f"保存任务到数据库失败: {e}")
+
+    def _update_task_status_in_db(self, task_id: str, status: str) -> None:
+        """更新任务状态到数据库"""
+        try:
+            from database import db
+            if not db.is_connected():
+                return
+
+            updates = ["status = %s"]
+            params = [status]
+
+            if status == "running":
+                updates.append("started_at = CURRENT_TIMESTAMP")
+            elif status in ("success", "failed", "cancelled"):
+                updates.append("completed_at = CURRENT_TIMESTAMP")
+
+            params.append(task_id)
+            sql = f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = %s"
+            db.execute(sql, tuple(params))
+        except Exception as e:
+            logger.warning(f"更新任务状态失败: {e}")
+
+    def _update_task_progress_in_db(self, task_id: str, progress: int) -> None:
+        """更新任务进度到数据库"""
+        try:
+            from database import db
+            if not db.is_connected():
+                return
+
+            sql = "UPDATE tasks SET progress = %s WHERE task_id = %s"
+            db.execute(sql, (progress, task_id))
+        except Exception as e:
+            logger.warning(f"更新任务进度失败: {e}")
+
+    def _update_task_complete_in_db(
+        self,
+        task_id: str,
+        status: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None
+    ) -> None:
+        """更新任务完成状态到数据库"""
+        try:
+            from database import db
+            if not db.is_connected():
+                return
+
+            import json
+            updates = []
+            params = []
+
+            if status:
+                updates.append("status = %s")
+                params.append(status)
+                if status in ("success", "failed", "cancelled"):
+                    updates.append("completed_at = CURRENT_TIMESTAMP")
+
+            if result:
+                updates.append("result = %s")
+                params.append(json.dumps(result, ensure_ascii=False))
+
+            if error:
+                updates.append("error = %s")
+                params.append(error)
+
+            params.append(task_id)
+            sql = f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = %s"
+            db.execute(sql, tuple(params))
+        except Exception as e:
+            logger.warning(f"更新任务完成状态失败: {e}")
+
+    def _save_resources_from_task(self, task_id: str, task_type: str, result: Dict[str, Any]) -> None:
+        """
+        从任务结果中自动保存生成的资源
+
+        Args:
+            task_id: 任务ID
+            task_type: 任务类型
+            result: 任务结果
+        """
+        try:
+            from database import db
+            if not db.is_connected():
+                return
+
+            # 获取用户数据库ID
+            sql = "SELECT user_id FROM tasks WHERE task_id = %s"
+            task_row = db.fetch_one(sql, (task_id,))
+            if not task_row:
+                return
+
+            user_db_id = task_row.get("user_id")
+            if not user_db_id:
+                return
+
+            # 使用 ResourceDAO 保存资源
+            from dao.resource_dao import ResourceDAO
+            resource_ids = ResourceDAO.save_resources_from_task(
+                user_db_id=user_db_id,
+                task_id=task_id,
+                task_type=task_type,
+                result=result
+            )
+
+            if resource_ids:
+                logger.info(f"任务 {task_id} 自动保存了 {len(resource_ids)} 个资源")
+        except Exception as e:
+            logger.warning(f"自动保存资源失败: {e}")
 
     def cleanup_old_tasks(self, days: int = 7) -> int:
-        """清理旧任务"""
-        from datetime import timedelta
-
+        """清理旧任务（内存和数据库）"""
         cutoff = datetime.utcnow() - timedelta(days=days)
         to_remove = [
             tid for tid, task in self.tasks.items()
@@ -232,16 +397,19 @@ class TaskManager:
             self.tasks.pop(tid)
 
         logger.info(f"清理了 {len(to_remove)} 个旧任务")
-        # 清理后保存
-        self._save_tasks()
+
+        # 清理数据库中的旧任务
+        try:
+            from database import db
+            if db.is_connected():
+                from dao.task_dao import TaskDAO
+                db_count = TaskDAO.cleanup_old_tasks(days)
+                logger.info(f"数据库清理了 {db_count} 个旧任务")
+        except Exception as e:
+            logger.warning(f"数据库清理失败: {e}")
+
         return len(to_remove)
 
 
 # 全局任务管理器实例
-# 使用持久化文件，服务重启后任务不会丢失
-import os
-TEMP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/temp"
-task_manager = TaskManager(
-    max_concurrent=5,
-    persist_file=f"{TEMP_DIR}/tasks.json"
-)
+task_manager = TaskManager(max_concurrent=5)

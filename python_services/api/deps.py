@@ -4,14 +4,10 @@
 """
 
 from typing import Optional
-from fastapi import Header, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
-from core.security import decode_access_token
+from fastapi import Header, HTTPException
 from core.logger import get_logger
 
 logger = get_logger("deps")
-security = HTTPBearer(auto_error=False)
 
 
 async def get_request_id(
@@ -21,50 +17,33 @@ async def get_request_id(
     return x_request_id or "req_unknown"
 
 
-async def verify_token(
-    credentials: Optional[HTTPAuthorizationCredentials] = Header(None)
-) -> Optional[dict]:
+async def get_current_user() -> Optional[dict]:
     """
-    验证JWT Token
+    获取当前用户（从 Database 上下文）
+    认证中间件已验证，这里只读取上下文
+    """
+    from database import Database
+    from dao.user_dao import UserDAO
 
-    可选鉴权：如果传了token则验证，没传则返回None
-    """
-    if credentials is None:
+    user_db_id = Database.get_current_user_id()
+    if not user_db_id:
         return None
 
-    try:
-        payload = decode_access_token(credentials.credentials)
-        return payload
-    except Exception as e:
-        logger.warning(f"Token验证失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无效的认证凭据"
-        )
+    user = UserDAO.get_by_id(user_db_id, skip_user_filter=True)
+    if not user:
+        return None
+
+    return {
+        "user_id": user.user_id,
+        "api_key": user.api_key,
+        "name": user.username,
+        "role": user.role,
+    }
 
 
-async def require_auth(
-    credentials: Optional[HTTPAuthorizationCredentials] = Header(None)
-) -> dict:
-    """
-    强制要求认证
-
-    必须提供有效的Token
-    """
-    if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="缺少认证凭据"
-        )
-
-    try:
-        payload = decode_access_token(credentials.credentials)
-        return payload
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.warning(f"Token验证失败: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无效的认证凭据"
-        )
+async def require_admin() -> dict:
+    """要求管理员权限"""
+    user = await get_current_user()
+    if not user or user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return user
