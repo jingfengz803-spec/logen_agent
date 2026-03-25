@@ -28,6 +28,8 @@ class Database:
         "douyin_fetch_tasks",
         "douyin_videos",
         "operation_logs",
+        "profiles",
+        "user_industries",
     }
 
     @classmethod
