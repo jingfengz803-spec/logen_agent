@@ -4,6 +4,7 @@
 """
 
 from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
+from pydantic import Field
 from typing import Optional, List
 
 from models.request import CommonRequest
@@ -72,7 +73,7 @@ class GenerateFromProfileRequest(CommonRequest):
     profile_id: str  # 档案ID
     generate_type: str = "video_script"  # video_script 或 text_copy
     topic: Optional[str] = None  # 可选的主题补充
-    count: int = 3  # 生成版本数量
+    count: int = Field(3, ge=1, le=5, description="生成版本数量")
 
 
 # ==================== 串联接口 ====================
@@ -711,6 +712,10 @@ async def generate_from_profile(
     """
     try:
         from dao.profile_dao import ProfileDAO
+
+        # 0. 参数校验
+        if request.generate_type not in ("video_script", "text_copy"):
+            raise HTTPException(status_code=400, detail="generate_type 必须是 video_script 或 text_copy")
 
         # 1. 获取档案
         profile = ProfileDAO.get_profile(request.profile_id)
