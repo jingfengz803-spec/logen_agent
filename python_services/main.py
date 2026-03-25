@@ -28,7 +28,7 @@ from middleware.auth import AuthMiddleware
 from middleware.error_handler import setup_exception_handlers
 
 # 导入API路由
-from api.v1 import douyin, ai, tts, video, storage, users, chain, resources
+from api.v1 import douyin, ai, tts, video, storage, users, chain, resources, profiles
 
 # 获取日志器
 app_logger = get_logger("app")
@@ -64,6 +64,8 @@ async def lifespan(app: FastAPI):
             DouyinDAO.init_table()  # 抖音表
             TaskDAO.init_table()      # 任务表（已在 models/db.py 定义）
             ResourceDAO.init_table()  # 资源表
+            from dao.profile_dao import ProfileDAO
+            ProfileDAO.init_tables()  # 档案表
 
             # 从数据库加载任务
             task_manager.load_from_db()
@@ -269,6 +271,11 @@ def _setup_routes(app: FastAPI):
     # 资源管理路由
     app.include_router(
         resources.router,
+        prefix=settings.API_PREFIX,
+    )
+    # 档案管理路由
+    app.include_router(
+        profiles.router,
         prefix=settings.API_PREFIX,
     )
 
