@@ -16,6 +16,7 @@ from services.douyin_service import DouyinService
 from core.task_manager import task_manager
 from core.logger import get_logger
 from api.deps import get_request_id
+from database import Database
 
 logger = get_logger("api:douyin")
 router = APIRouter(prefix="/douyin", tags=["抖音抓取"])
@@ -44,8 +45,13 @@ async def fetch_user_videos(
 
     返回任务ID，可通过 /task/{task_id} 查询进度
     如果 wait=true，则等待完成后直接返回结果
+
+    需要在请求头中添加: X-API-Key: your-api-key
     """
     try:
+        # 捕获 user_db_id，供后台任务使用（请求结束后 Database 上下文会被清除）
+        user_db_id = Database.get_current_user_id()
+
         logger.info(f"收到用户视频抓取请求: {request.url}, wait={request.wait}")
 
         # 如果 wait=true，直接同步执行并返回结果
@@ -80,9 +86,23 @@ async def fetch_user_videos(
             "top_n": request.top_n
         })
 
+        # 在 douyin_fetch_tasks 表中创建记录
+        if user_db_id:
+            from dao.douyin_dao import DouyinDAO
+            DouyinDAO.create_fetch_task(
+                user_db_id,
+                fetch_type="user",
+                target_value=request.url,
+                task_id=task_id
+            )
+
         # 提交后台任务 - 直接执行异步逻辑
         async def run_fetch():
             try:
+                # 更新任务状态为 running
+                if user_db_id:
+                    DouyinDAO.update_fetch_task(task_id, status="running")
+
                 task_manager.update_progress(task_id, 10, "开始抓取...")
                 result = await douyin_service.fetch_user_videos_async(
                     url=request.url,
@@ -94,11 +114,27 @@ async def fetch_user_videos(
                     sort_by=request.sort_by,
                     progress_callback=lambda p, msg: task_manager.update_progress(task_id, p, msg)
                 )
+                # 抓取完成后，保存视频到数据库
+                video_count = 0
+                if user_db_id and result:
+                    videos = result.get("videos", [])  # 修复: 使用 "videos" 而不是 "data"
+                    video_count = len(videos)
+                    logger.info(f"📊 准备保存视频: video_count={video_count}, result keys={list(result.keys())}")
+                    DouyinDAO.save_videos_batch(user_db_id, videos)
+
+                # 更新任务状态为 completed
+                if user_db_id:
+                    logger.info(f"📝 更新任务状态: task_id={task_id}, status=completed, video_count={video_count}")
+                    DouyinDAO.update_fetch_task(task_id, status="completed", video_count=video_count)
+
                 task_manager.update_progress(task_id, 100, "抓取完成")
                 return result
             except Exception as e:
                 logger.error(f"抓取任务失败: {e}")
                 task_manager.update_progress(task_id, 0, f"抓取失败: {e}")
+                # 更新任务状态为 failed
+                if user_db_id:
+                    DouyinDAO.update_fetch_task(task_id, status="failed", error_message=str(e))
                 raise
 
         # 在后台执行异步任务
