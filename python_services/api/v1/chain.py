@@ -67,6 +67,14 @@ class VideoFromTTSRequest(CommonRequest):
     resolution: Optional[str] = None  # 分辨率（如 1280x720）
 
 
+class GenerateFromProfileRequest(CommonRequest):
+    """根据档案生成文案请求"""
+    profile_id: str  # 档案ID
+    generate_type: str = "video_script"  # video_script 或 text_copy
+    topic: Optional[str] = None  # 可选的主题补充
+    count: int = 3  # 生成版本数量
+
+
 # ==================== 串联接口 ====================
 
 @router.post("/analyze/from-fetch", response_model=TaskResponse)
@@ -677,3 +685,149 @@ async def get_chain_task_status(
         error=task.error,
         request_id=request_id
     )
+
+
+@router.post("/generate-from-profile", response_model=TaskResponse)
+async def generate_from_profile(
+    request: GenerateFromProfileRequest,
+    background_tasks: BackgroundTasks,
+    request_id: str = Depends(get_request_id)
+):
+    """
+    根据档案生成文案（支持短视频脚本和纯文字文案）
+
+    流程：
+    1. 从 profiles 表获取档案信息
+    2. 组装 prompt 发送给大模型
+    3. 返回 3 个版本的文案供用户选择
+
+    请求参数：
+    - profile_id: 档案ID
+    - generate_type: video_script（短视频脚本）或 text_copy（纯文字文案）
+    - topic: 可选的主题补充
+    - count: 生成版本数量（默认3）
+
+    返回：任务 task_id，任务完成后 result 中包含多个版本的文案
+    """
+    try:
+        from dao.profile_dao import ProfileDAO
+
+        # 1. 获取档案
+        profile = ProfileDAO.get_profile(request.profile_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail=f"档案不存在: {request.profile_id}")
+
+        logger.info(f"从档案生成文案: profile={request.profile_id}, type={request.generate_type}")
+
+        # 2. 组装 prompt
+        type_desc = "短视频脚本（含分镜、台词、时长建议）" if request.generate_type == "video_script" else "纯文字文案（适合社交媒体发布）"
+
+        topic_section = f"\n补充主题：{request.topic}" if request.topic else ""
+
+        reference_section = ""
+        if profile.get("video_url"):
+            reference_section += f"\n- 参考视频：{profile['video_url']}"
+        if profile.get("homepage_url"):
+            reference_section += f"\n- 参考主页：{profile['homepage_url']}"
+
+        prompt = f"""你是一个专业的内容策划师，请根据以下档案信息生成{type_desc}：
+
+行业：{profile['industry']}
+目标用户群体：{profile['target_audience']}
+客户痛点：{profile['customer_pain_points']}
+解决方案：{profile['solution']}
+人设背景：{profile['persona_background']}
+{reference_section}{topic_section}
+
+请生成 {request.count} 个不同风格的版本，每个版本之间用 "---VERSION---" 分隔。
+每个版本应包含：标题、正文内容。"""
+
+        # 3. 创建任务
+        task_id = task_manager.create_task("chain_generate_from_profile", {
+            "profile_id": request.profile_id,
+            "generate_type": request.generate_type,
+            "count": request.count
+        })
+
+        # 4. 调用大模型
+        async def run_generation():
+            from core.config import settings
+            import httpx
+
+            # 获取 LLM 配置
+            api_key = settings.get("DASHSCOPE_API_KEY", "")
+            base_url = settings.get("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+            model = settings.get("LLM_MODEL", "qwen-plus")
+
+            if not api_key:
+                raise ValueError("未配置 LLM API Key")
+
+            task_manager.update_progress(task_id, 20, "正在调用大模型...")
+
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": "你是一个专业的内容策划师，擅长根据用户档案信息生成高质量的短视频脚本和文案。"},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "temperature": 0.8,
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+
+            content = result["choices"][0]["message"]["content"]
+            task_manager.update_progress(task_id, 80, "文案生成完成，正在解析...")
+
+            # 解析多个版本
+            versions = [v.strip() for v in content.split("---VERSION---") if v.strip()]
+
+            # 如果分隔符没生效，按整体返回一个版本
+            if len(versions) <= 1:
+                versions = [content.strip()]
+
+            result_data = {
+                "versions": [
+                    {"index": i + 1, "content": v}
+                    for i, v in enumerate(versions[:request.count])
+                ],
+                "profile_id": request.profile_id,
+                "generate_type": request.generate_type,
+            }
+
+            task_manager.update_progress(task_id, 100, "完成")
+            return result_data
+
+        import asyncio
+        try:
+            asyncio.create_task(task_manager.submit_task(task_id, run_generation))
+        except RuntimeError:
+            def run_in_new_loop():
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    new_loop.run_until_complete(task_manager.submit_task(task_id, run_generation))
+                finally:
+                    new_loop.close()
+            background_tasks.add_task(run_in_new_loop)
+
+        task = task_manager.get_task(task_id)
+        return TaskResponse(
+            code=200,
+            message="文案生成任务已创建",
+            task_id=task_id,
+            status=TaskStatus(task.status.value),
+            progress=task.progress,
+            created_at=task.created_at,
+            request_id=request_id
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"从档案生成文案失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

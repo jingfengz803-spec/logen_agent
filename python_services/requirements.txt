@@ -11,12 +11,14 @@ pydantic-settings==2.1.0
 
 # ==================== 认证与安全 ====================
 python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
+passlib==1.7.4
+bcrypt==3.2.2
 python-dotenv==1.0.0
 
 # ==================== 数据库 ====================
 sqlalchemy==2.0.25
 alembic==1.13.1
+pymysql==1.1.0
 
 # ==================== 任务队列（可选） ====================
 celery==5.3.4
