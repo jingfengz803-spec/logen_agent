@@ -128,11 +128,11 @@ def _migrate_orphan_data():
     system_user = UserDAO.get_by_user_id("user_system")
     if not system_user:
         sql = """
-            INSERT INTO users (user_id, username, role, status)
-            VALUES ('user_system', 'system', 'admin', 1)
+            INSERT INTO users (user_id, username, api_key, role, status)
+            VALUES ('user_system', 'system', 'sys-no-login', 'admin', 1)
         """
         try:
-            db.execute(sql, skip_user_filter=True)
+            db.execute(sql)
             app_logger.info("✅ 创建系统用户完成")
             system_user = UserDAO.get_by_user_id("user_system")
         except Exception as e:

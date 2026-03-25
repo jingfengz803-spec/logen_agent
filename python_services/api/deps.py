@@ -29,7 +29,7 @@ async def get_current_user() -> Optional[dict]:
     if not user_db_id:
         return None
 
-    user = UserDAO.get_by_id(user_db_id, skip_user_filter=True)
+    user = UserDAO.get_by_id(user_db_id)
     if not user:
         return None
 
