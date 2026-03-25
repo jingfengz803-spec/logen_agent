@@ -1,62 +1,84 @@
 """
-认证中间件
-处理JWT认证和权限验证
+全局认证中间件
+基于 X-API-Key 请求头进行 API Key 验证
 """
 
-from fastapi import Request, HTTPException, status
+from fastapi import Request
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from typing import Optional
 
-from core.security import decode_access_token
+from core.security import SimpleAuth
 from core.logger import get_logger
 
 logger = get_logger("middleware:auth")
 
+# 白名单路径（跳过认证）
+WHITELIST_PATHS = {
+    "/health",
+    "/",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/api/v1/users/register",
+    "/api/v1/users/login",
+}
+
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """
-    认证中间件
-    可选认证：部分接口需要认证，部分不需要
-    """
-
-    # 不需要认证的路径
-    PUBLIC_PATHS = {
-        "/health",
-        "/docs",
-        "/openapi.json",
-        "/redoc",
-        "/api/v1/douyin/fetch/user",  # 示例：公开接口
-    }
+    """全局 API Key 认证中间件"""
 
     async def dispatch(self, request: Request, call_next):
-        """处理请求并验证认证"""
-        path = request.url.path
+        """处理请求，验证 API Key"""
 
-        # 检查是否是公开路径
-        if self._is_public_path(path):
+        # OPTIONS 请求（CORS 预检）跳过认证
+        if request.method == "OPTIONS":
             return await call_next(request)
 
-        # 获取token
-        authorization = request.headers.get("Authorization")
-        if not authorization:
-            return await call_next(request)  # 可选认证，不强制
+        # 白名单路径跳过认证
+        if request.url.path in WHITELIST_PATHS:
+            return await call_next(request)
 
-        # 验证token
+        # 检查 X-API-Key 请求头
+        api_key = request.headers.get("X-API-Key")
+        if not api_key:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "缺少 API Key，请在请求头中添加 X-API-Key"},
+            )
+
+        # 验证 API Key
         try:
-            token = authorization.replace("Bearer ", "")
-            payload = decode_access_token(token)
-
-            # 将用户信息存入请求状态
-            request.state.user = payload
-
-        except HTTPException:
-            # Token无效，但继续处理（由具体接口决定是否需要认证）
-            pass
+            user = SimpleAuth.verify_api_key(api_key)
         except Exception as e:
-            logger.warning(f"Auth middleware error: {e}")
+            # 捕获 SimpleAuth 抛出的 HTTPException 或其他异常
+            detail = getattr(e, "detail", None) or "无效的 API Key"
+            return JSONResponse(
+                status_code=401,
+                content={"detail": detail},
+            )
 
-        return await call_next(request)
+        # 设置用户上下文
+        try:
+            from dao.user_dao import UserDAO
+            from database import Database
 
-    def _is_public_path(self, path: str) -> bool:
-        """检查是否是公开路径"""
-        return any(path.startswith(p) for p in self.PUBLIC_PATHS)
+            user_id_str = user.get("user_id")
+            if user_id_str:
+                db_user = UserDAO.get_by_user_id(user_id_str)
+                if db_user:
+                    Database.set_current_user(db_user.id, user.get("role", "user"))
+                    logger.debug(f"用户上下文已设置: {user_id_str} (db_id={db_user.id})")
+        except Exception as e:
+            logger.warning(f"设置用户上下文失败: {e}")
+
+        try:
+            response = await call_next(request)
+        finally:
+            # 请求完成后清除用户上下文
+            try:
+                from database import Database
+                Database.clear_current_user()
+            except Exception:
+                pass
+
+        return response
