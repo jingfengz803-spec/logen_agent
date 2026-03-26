@@ -64,11 +64,12 @@ class VoiceDAO:
     def list_voices(status: str = None) -> list:
         """获取当前用户的音色列表（自动按 user_id 过滤）"""
         if status:
-            sql = "SELECT * FROM voices WHERE status = %s ORDER BY created_at DESC"
+            sql = "SELECT * FROM voices WHERE status = %s"
             rows = db.fetch_all(sql, (status,))
         else:
-            sql = "SELECT * FROM voices ORDER BY created_at DESC"
+            sql = "SELECT * FROM voices WHERE 1=1"
             rows = db.fetch_all(sql)
+        rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
         return rows
 
     @staticmethod
