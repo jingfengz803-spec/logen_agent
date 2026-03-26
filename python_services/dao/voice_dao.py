@@ -68,7 +68,7 @@ class VoiceDAO:
             rows = db.fetch_all(sql, (status,))
         else:
             sql = "SELECT * FROM voices WHERE 1=1"
-            rows = db.fetch_all(sql)
+            rows = list(db.fetch_all(sql))
         rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
         return rows
 
