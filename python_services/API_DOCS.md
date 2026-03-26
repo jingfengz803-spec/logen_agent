@@ -753,6 +753,10 @@ POST /api/v1/tts/voice/create-from-url
 GET /api/v1/tts/voice/list
 ```
 
+**请求头：** `X-API-Key: your-api-key`
+
+**说明：** 返回当前用户自己创建的音色列表（自动按用户隔离）。
+
 **响应示例：**
 
 ```json
@@ -779,9 +783,48 @@ GET /api/v1/tts/voice/list
 GET /api/v1/tts/voice/{voice_id}
 ```
 
+**请求头：** `X-API-Key: your-api-key`
+
+**说明：** 只能查询当前用户自己创建的音色，其他用户的音色返回 404。
+
 ---
 
-### 5. 文字转语音
+### 5. 获取所有音色（管理员专用）
+
+```http
+GET /api/v1/tts/admin/voices?status=OK&limit=100
+```
+
+**请求头：** `X-API-Key: admin-api-key` ⚠️ 需要管理员权限
+
+**查询参数：**
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| status | string | 否 | - | 按状态过滤 (DEPLOYING/OK/UNDEPLOYED) |
+| limit | int | 否 | 100 | 返回数量限制 |
+
+**响应示例：**
+
+```json
+{
+  "voices": [
+    {
+      "voice_id": "cosyvoice-v3.5-flash-myvoice-xxx",
+      "prefix": "myvoice",
+      "model": "cosyvoice-v3.5-flash",
+      "status": "OK",
+      "created_at": "2024-01-01T00:00:00",
+      "is_available": true
+    }
+  ],
+  "request_id": "req_123"
+}
+```
+
+---
+
+### 6. 文字转语音
 
 ```http
 POST /api/v1/tts/speech
@@ -821,7 +864,7 @@ POST /api/v1/tts/speech
 
 ---
 
-### 6. 分段文字转语音
+### 7. 分段文字转语音
 
 ```http
 POST /api/v1/tts/speech/segments
@@ -849,7 +892,7 @@ POST /api/v1/tts/speech/segments
 
 ---
 
-### 7. TTS 脚本转语音
+### 8. TTS 脚本转语音
 
 ```http
 POST /api/v1/tts/script
@@ -2089,6 +2132,7 @@ try {
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| 1.2.0 | 2026-03-26 | 音色列表/查询接口改为用户隔离；新增管理员音色列表接口 |
 | 1.1.0 | 2026-03-25 | 新增档案管理模块（档案CRUD、行业管理、从档案生成文案） |
 | 1.0.0 | 2024-01-01 | 初始版本 |
 
