@@ -21,8 +21,9 @@ from models.response import (
 from services.tts_service import TTSService
 from core.task_manager import task_manager
 from core.logger import get_logger
-from api.deps import get_request_id
+from api.deps import get_request_id, require_admin
 from database import Database
+from dao.voice_dao import VoiceDAO
 
 logger = get_logger("api:tts")
 router = APIRouter(prefix="/tts", tags=["TTS语音"])
@@ -111,6 +112,19 @@ async def create_voice_from_file(
                     auto_upload_oss=auto_upload_oss
                 )
 
+                # 保存音色到数据库
+                voice_id = result.get("voice_id")
+                if voice_id:
+                    user_db_id = Database.get_current_user_id()
+                    VoiceDAO.create_voice(
+                        user_db_id=user_db_id,
+                        voice_id=voice_id,
+                        prefix=prefix,
+                        model=model,
+                        status=result.get("status", "DEPLOYING"),
+                        target_model=result.get("model"),
+                    )
+
                 task_manager.update_progress(task_id, 100, "完成")
 
                 # 返回完整结果
@@ -164,34 +178,25 @@ async def list_voices(
     request_id: str = Depends(get_request_id)
 ):
     """
-    获取音色列表
-
-    返回所有已创建的音色及其状态
+    获取当前用户的音色列表（自动按用户隔离）
     """
     try:
-        voices = await tts_service.list_voices_async()
+        voices = VoiceDAO.list_voices()
 
         voice_infos = []
         for v in voices:
-            voice_id = v.get("voice_id", "")
-            # 从 voice_id 中提取 prefix（音色名称部分）
-            # voice_id 格式: cosyvoice-v3.5-flash-prefix-xxx
-            prefix = ""
-            if voice_id:
-                parts = voice_id.split('-')
-                if len(parts) >= 5:
-                    # cosyvoice-v3.5-flash-prefix-xxx -> prefix 是第4部分
-                    prefix = parts[3]
-                elif len(parts) >= 4:
-                    # cosyvoice-v1-prefix-xxx -> prefix 是第3部分
-                    prefix = parts[2]
-            
+            created_at = ""
+            if v.get("gmt_create"):
+                created_at = str(v["gmt_create"])
+            elif v.get("created_at"):
+                created_at = str(v["created_at"])
+
             voice_infos.append(VoiceInfo(
-                voice_id=voice_id,
-                prefix=prefix or v.get("prefix", ""),
-                model=v.get("target_model", ""),
+                voice_id=v.get("voice_id", ""),
+                prefix=v.get("prefix", ""),
+                model=v.get("target_model") or v.get("model", ""),
                 status=v.get("status", "UNKNOWN"),
-                created_at=v.get("gmt_create", ""),
+                created_at=created_at,
                 is_available=v.get("status") == "OK"
             ))
 
@@ -210,30 +215,26 @@ async def get_voice(
     request_id: str = Depends(get_request_id)
 ):
     """
-    查询单个音色状态
+    查询单个音色（自动按用户隔离，只能查看自己的音色）
     """
     try:
-        voice = await tts_service.get_voice_async(voice_id)
+        voice = VoiceDAO.get_by_voice_id(voice_id)
         if not voice:
             raise HTTPException(status_code=404, detail="音色不存在")
 
-        vid = voice.get("voice_id", voice_id)
-        # 从 voice_id 中提取 prefix
-        prefix = ""
-        if vid:
-            parts = vid.split('-')
-            if len(parts) >= 5:
-                prefix = parts[3]
-            elif len(parts) >= 4:
-                prefix = parts[2]
+        created_at = ""
+        if voice.gmt_create:
+            created_at = str(voice.gmt_create)
+        elif voice.created_at:
+            created_at = str(voice.created_at)
 
         voice_info = VoiceInfo(
-            voice_id=vid,
-            prefix=prefix or voice.get("prefix", ""),
-            model=voice.get("target_model", ""),
-            status=voice.get("status", "UNKNOWN"),
-            created_at=voice.get("gmt_create", ""),
-            is_available=voice.get("status") == "OK"
+            voice_id=voice.voice_id,
+            prefix=voice.prefix,
+            model=voice.target_model or voice.model,
+            status=voice.status,
+            created_at=created_at,
+            is_available=voice.status == "OK"
         )
 
         return VoiceListResponse(
@@ -244,6 +245,45 @@ async def get_voice(
         raise
     except Exception as e:
         logger.error(f"查询音色失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/voices", response_model=VoiceListResponse)
+async def list_all_voices(
+    status: Optional[str] = None,
+    limit: int = 100,
+    _admin: dict = Depends(require_admin),
+    request_id: str = Depends(get_request_id)
+):
+    """
+    管理员接口：获取所有用户的音色列表
+    """
+    try:
+        voices = VoiceDAO.list_all(status=status, limit=limit)
+
+        voice_infos = []
+        for v in voices:
+            created_at = ""
+            if v.get("gmt_create"):
+                created_at = str(v["gmt_create"])
+            elif v.get("created_at"):
+                created_at = str(v["created_at"])
+
+            voice_infos.append(VoiceInfo(
+                voice_id=v.get("voice_id", ""),
+                prefix=v.get("prefix", ""),
+                model=v.get("target_model") or v.get("model", ""),
+                status=v.get("status", "UNKNOWN"),
+                created_at=created_at,
+                is_available=v.get("status") == "OK"
+            ))
+
+        return VoiceListResponse(
+            voices=voice_infos,
+            request_id=request_id
+        )
+    except Exception as e:
+        logger.error(f"管理员获取音色列表失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -275,12 +315,25 @@ async def create_voice_from_url(
         })
 
         async def run_create():
-            return await tts_service.create_voice_async(
+            result = await tts_service.create_voice_async(
                 audio_url=request.audio_url,
                 prefix=request.prefix,
                 model=request.model,
                 wait_ready=request.wait_ready
             )
+            # 保存音色到数据库
+            voice_id = result.get("voice_id")
+            if voice_id:
+                user_db_id = Database.get_current_user_id()
+                VoiceDAO.create_voice(
+                    user_db_id=user_db_id,
+                    voice_id=voice_id,
+                    prefix=request.prefix,
+                    model=request.model,
+                    status=result.get("status", "DEPLOYING"),
+                    target_model=result.get("model"),
+                )
+            return result
 
         import asyncio
         try:
