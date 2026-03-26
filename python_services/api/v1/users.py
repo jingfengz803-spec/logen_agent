@@ -182,9 +182,13 @@ async def get_current_user(
     """
     获取当前用户信息（需要 API Key）
     """
-    # 这里需要从请求头获取 API Key 并验证
-    # 暂时返回提示信息
+    from api.deps import get_current_user as _get_current_user
+    user = await _get_current_user()
+    if not user:
+        raise HTTPException(status_code=401, detail="未认证，请在请求头中添加 X-API-Key")
     return {
-        "message": "请在请求头中添加 X-API-Key 进行认证",
-        "example": "X-API-Key: test-key-123456"
+        "code": 200,
+        "message": "success",
+        "data": user,
+        "request_id": request_id
     }
