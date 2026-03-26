@@ -30,6 +30,7 @@ class Database:
         "operation_logs",
         "profiles",
         "user_industries",
+        "voices",
     }
 
     @classmethod
