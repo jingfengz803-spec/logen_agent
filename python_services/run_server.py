@@ -1,6 +1,10 @@
 """
 API服务启动脚本
 """
+import os
+# 必须在导入 passlib 之前设置
+os.environ.setdefault('PASSLIB_BUILTIN_BCRYPT', '1')
+
 import sys
 import argparse
 from pathlib import Path
@@ -14,7 +18,6 @@ load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
 from python_services.core.config import settings
 from python_services.core.logger import logger
-
 
 def main():
     parser = argparse.ArgumentParser(description="短视频创作自动化API服务")

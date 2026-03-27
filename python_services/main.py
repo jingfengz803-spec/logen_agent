@@ -28,7 +28,7 @@ from middleware.auth import AuthMiddleware
 from middleware.error_handler import setup_exception_handlers
 
 # 导入API路由
-from api.v1 import douyin, ai, tts, video, storage, users, chain, resources, profiles
+from api.v1 import douyin, ai, tts, video, storage, users, chain, resources, profiles, topics
 
 # 获取日志器
 app_logger = get_logger("app")
@@ -66,6 +66,8 @@ async def lifespan(app: FastAPI):
             ResourceDAO.init_table()  # 资源表
             from dao.profile_dao import ProfileDAO
             ProfileDAO.init_tables()  # 档案表
+            from dao.topic_dao import TopicDAO
+            TopicDAO.init_table()  # 选题表
 
             # 从数据库加载任务
             task_manager.load_from_db()
@@ -154,7 +156,7 @@ def _migrate_orphan_data():
             row = db.fetch_one(check_sql, skip_user_filter=True)
             if row and row["cnt"] > 0:
                 migrate_sql = f"UPDATE {table} SET user_id = %s WHERE user_id IS NULL"
-                affected = db.execute(migrate_sql, (system_db_id,))
+                affected = db.execute(migrate_sql, (system_db_id,), skip_user_filter=True)
                 app_logger.info(f"✅ 迁移 {table}: {affected} 条数据归属到系统用户")
         except Exception as e:
             app_logger.debug(f"迁移 {table} 跳过: {e}")
@@ -276,6 +278,11 @@ def _setup_routes(app: FastAPI):
     # 档案管理路由
     app.include_router(
         profiles.router,
+        prefix=settings.API_PREFIX,
+    )
+    # 选题管理路由
+    app.include_router(
+        topics.router,
         prefix=settings.API_PREFIX,
     )
 

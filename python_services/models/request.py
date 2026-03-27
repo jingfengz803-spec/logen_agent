@@ -64,10 +64,15 @@ class AnalyzeStyleRequest(CommonRequest):
 
 class GenerateScriptRequest(CommonRequest):
     """生成脚本请求"""
-    style_analysis: dict = Field(..., description="风格分析结果")
-    viral_analysis: dict = Field(..., description="火爆原因分析结果")
+    profile_id: Optional[str] = Field(None, description="档案ID，传入时将档案信息作为上下文")
+    style_analysis: Optional[dict] = Field(None, description="风格分析结果（可选）")
+    viral_analysis: Optional[dict] = Field(None, description="火爆原因分析结果（可选）")
     topic: str = Field(..., description="新主题", min_length=1)
-    target_duration: float = Field(20.0, description="目标时长(秒)", ge=10.0, le=180.0)
+    target_duration: float = Field(60.0, description="目标时长(秒)", ge=10.0, le=180.0)
+
+    @validator("profile_id", pre=True)
+    def coerce_profile_id(cls, v):
+        return str(v) if v is not None else None
 
 
 class FullAnalysisRequest(CommonRequest):
@@ -92,18 +97,16 @@ class TTSType(str, Enum):
 class CreateVoiceRequest(CommonRequest):
     """创建音色请求"""
     audio_url: str = Field(..., description="音色音频公网URL")
-    prefix: str = Field("myvoice", description="音色前缀", max_length=10, pattern="^[a-zA-Z0-9_]+$")
-    model: str = Field("cosyvoice-v3.5-flash", description="TTS模型")
-    language_hints: Optional[List[str]] = Field(None, description="语言提示")
+    prefix: str = Field("myvoice", description="音色前缀", max_length=20)
+    model: str = Field("cosyvoice-v3.5-plus", description="TTS模型")
     wait_ready: bool = Field(True, description="是否等待就绪")
 
 
 class CreateVoiceWithPreviewRequest(CommonRequest):
     """创建音色并生成试听音频请求"""
     audio_url: str = Field(..., description="音色音频公网URL")
-    prefix: str = Field("myvoice", description="音色前缀", max_length=10, pattern="^[a-zA-Z0-9_]+$")
-    model: str = Field("cosyvoice-v3.5-flash", description="TTS模型")
-    language_hints: Optional[List[str]] = Field(None, description="语言提示")
+    prefix: str = Field("myvoice", description="音色前缀", max_length=20)
+    model: str = Field("cosyvoice-v3.5-plus", description="TTS模型")
     preview_text: str = Field("你好，这是我的音色。", description="试听文本")
     auto_upload_oss: bool = Field(True, description="是否自动上传试听音频到OSS")
 

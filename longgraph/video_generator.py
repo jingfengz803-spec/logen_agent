@@ -389,13 +389,16 @@ class VideoRetalkClient:
                 # 获取状态
                 output = result.get("output", {})
                 status = output.get("task_status") or result.get("output", {}).get("status")
+                message = output.get("message", "")
 
                 if callback:
                     callback(attempt + 1, status, result)
 
+                elapsed = (attempt + 1) * poll_interval
+
                 # 不同平台的状态字段可能不同
                 if status in ["SUCCEEDED", "completed", "success", "finished"]:
-                    print(f"✓ 视频生成完成!")
+                    print(f"✓ 视频生成完成! 耗时: {elapsed}秒")
                     return result
 
                 elif status in ["FAILED", "failed", "error"]:
@@ -404,14 +407,23 @@ class VideoRetalkClient:
 
                 elif status in ["PENDING", "RUNNING", "processing", "pending", "UNKNOWN"]:
                     # UNKNOWN 表示任务还在排队
-                    elapsed = (attempt + 1) * poll_interval
-                    print(f"进度: {attempt + 1}/{max_attempts} ({elapsed}秒) - 状态: {status}")
+                    msg_part = f" - {message}" if message else ""
+                    print(f"进度: {attempt + 1}/{max_attempts} ({elapsed}秒) - 状态: {status}{msg_part}")
                 else:
-                    print(f"进度: {attempt + 1}/{max_attempts} - 状态: {status}")
+                    print(f"进度: {attempt + 1}/{max_attempts} ({elapsed}秒) - 状态: {status}")
+
+                # 超过 10 分钟仍在 RUNNING，打印完整响应用于排查
+                if elapsed >= 600 and attempt % 12 == 0:
+                    print(f"⚠️ 已运行 {elapsed}秒，dashscope 响应: {json.dumps(result, ensure_ascii=False)[:500]}")
 
                 time.sleep(poll_interval)
 
+            except RuntimeError as e:
+                # 任务明确失败（FAILED 状态），不再重试
+                print(f"任务失败，停止轮询: {e}")
+                raise
             except Exception as e:
+                # 网络等临时错误，允许继续轮询
                 print(f"轮询出错: {e}")
                 if attempt < max_attempts - 1:
                     time.sleep(poll_interval)

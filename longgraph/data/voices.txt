@@ -1,1 +1,3 @@
 cosyvoice-v3.5-flash-niro-8cc614e161c44abe8621eadddb2e4a11 | niro | 2026-03-16
+cosyvoice-v3.5-flash-myvoice-e2864d01ebbf40fc9f13fbd520650935 | myvoice | 2026-03-24
+cosyvoice-v3.5-flash-myvoice-0f2e1a0418ee44828c257c0222cf3b8d | myvoice | 2026-03-24

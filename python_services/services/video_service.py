@@ -244,6 +244,8 @@ class VideoService:
                 if progress_callback:
                     progress_callback(70, "提交视频生成任务...")
 
+                logger.info(f"提交视频生成任务 - video_url: {final_video_url}, audio_url: {final_audio_url}")
+
                 # 使用VideoRetalk客户端生成视频
                 result = self.client.generate_video(
                     video_url=final_video_url,
@@ -255,11 +257,41 @@ class VideoService:
                 )
 
                 if progress_callback:
-                    progress_callback(100, "生成完成")
+                    progress_callback(90, "视频生成完成，处理返回结果...")
+
+                # 获取生成的视频URL
+                generated_video_url = result.get("video_url")
+
+                # 如果返回的是本地路径，上传到OSS
+                if generated_video_url and not generated_video_url.startswith("http"):
+                    if progress_callback:
+                        progress_callback(95, "上传生成的视频到OSS...")
+
+                    import asyncio
+                    try:
+                        upload_result = asyncio.get_event_loop().run_until_complete(
+                            self.storage.upload_file_async(
+                                file_path=generated_video_url,
+                                file_type="video"
+                            )
+                        )
+                        generated_video_url = upload_result.get("oss_url")
+                        logger.info(f"生成的视频已上传到OSS: {generated_video_url}")
+                    except RuntimeError:
+                        upload_result = asyncio.run(
+                            self.storage.upload_file_async(
+                                file_path=generated_video_url,
+                                file_type="video"
+                            )
+                        )
+                        generated_video_url = upload_result.get("oss_url")
+
+                if progress_callback:
+                    progress_callback(100, "全部完成")
 
                 return {
                     "task_id": result.get("request_id"),
-                    "video_url": result.get("video_url"),
+                    "video_url": generated_video_url,  # 确保是公网URL
                     "status": "SUCCESS",
                     "input_urls": {
                         "video_url": final_video_url,

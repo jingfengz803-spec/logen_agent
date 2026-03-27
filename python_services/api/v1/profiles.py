@@ -113,91 +113,7 @@ async def list_profiles(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/{profile_id}", response_model=DataResponse)
-async def get_profile(
-    profile_id: str,
-    request_id: str = Depends(get_request_id)
-):
-    """获取档案详情"""
-    try:
-        profile = ProfileDAO.get_profile(profile_id)
-        if not profile:
-            raise HTTPException(status_code=404, detail="档案不存在")
-
-        return DataResponse(
-            code=200,
-            message="success",
-            data=profile,
-            request_id=request_id
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"获取档案详情失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.put("/{profile_id}", response_model=BaseResponse)
-async def update_profile(
-    profile_id: str,
-    request: UpdateProfileRequest,
-    request_id: str = Depends(get_request_id)
-):
-    """更新档案"""
-    try:
-        success = ProfileDAO.update_profile(
-            profile_id=profile_id,
-            name=request.name,
-            industry=request.industry,
-            video_url=request.video_url,
-            homepage_url=request.homepage_url,
-            target_audience=request.target_audience,
-            customer_pain_points=request.customer_pain_points,
-            solution=request.solution,
-            persona_background=request.persona_background,
-        )
-        if not success:
-            raise HTTPException(status_code=404, detail="档案不存在或未修改")
-
-        return BaseResponse(
-            code=200,
-            message="档案更新成功",
-            request_id=request_id
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"更新档案失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.delete("/{profile_id}", response_model=BaseResponse)
-async def delete_profile(
-    profile_id: str,
-    request_id: str = Depends(get_request_id)
-):
-    """删除档案（软删除）"""
-    try:
-        success = ProfileDAO.delete_profile(profile_id)
-        if not success:
-            raise HTTPException(status_code=404, detail="档案不存在")
-
-        return BaseResponse(
-            code=200,
-            message="档案已删除",
-            request_id=request_id
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"删除档案失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ── 行业管理 ──────────────────────────────────────
+# ── 行业管理（必须在 /{profile_id} 之前注册，避免 "industries" 被当作 profile_id） ──
 
 @router.get("/industries", response_model=DataResponse)
 async def get_industries(
@@ -290,4 +206,90 @@ async def delete_custom_industry(
         raise
     except Exception as e:
         logger.error(f"删除自定义行业失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── 档案详情（带路径参数的路由必须放在固定路径之后） ──
+
+@router.get("/{profile_id}", response_model=DataResponse)
+async def get_profile(
+    profile_id: str,
+    request_id: str = Depends(get_request_id)
+):
+    """获取档案详情"""
+    try:
+        profile = ProfileDAO.get_profile(profile_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="档案不存在")
+
+        return DataResponse(
+            code=200,
+            message="success",
+            data=profile,
+            request_id=request_id
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取档案详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/{profile_id}", response_model=BaseResponse)
+async def update_profile(
+    profile_id: str,
+    request: UpdateProfileRequest,
+    request_id: str = Depends(get_request_id)
+):
+    """更新档案"""
+    try:
+        success = ProfileDAO.update_profile(
+            profile_id=profile_id,
+            name=request.name,
+            industry=request.industry,
+            video_url=request.video_url,
+            homepage_url=request.homepage_url,
+            target_audience=request.target_audience,
+            customer_pain_points=request.customer_pain_points,
+            solution=request.solution,
+            persona_background=request.persona_background,
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail="档案不存在或未修改")
+
+        return BaseResponse(
+            code=200,
+            message="档案更新成功",
+            request_id=request_id
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新档案失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{profile_id}", response_model=BaseResponse)
+async def delete_profile(
+    profile_id: str,
+    request_id: str = Depends(get_request_id)
+):
+    """删除档案（软删除）"""
+    try:
+        success = ProfileDAO.delete_profile(profile_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="档案不存在")
+
+        return BaseResponse(
+            code=200,
+            message="档案已删除",
+            request_id=request_id
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除档案失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

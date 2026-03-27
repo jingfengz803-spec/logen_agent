@@ -88,10 +88,18 @@ class ProfileDAO:
         ))
 
     @staticmethod
+    def _resolve_id(raw_id: str):
+        """根据输入判断使用 id（数字）还是 profile_id（字符串）"""
+        if raw_id.isdigit():
+            return "id", int(raw_id)
+        return "profile_id", raw_id
+
+    @staticmethod
     def get_profile(profile_id: str) -> Optional[Dict]:
-        """根据 profile_id 获取档案（自动按 user_id 过滤）"""
-        sql = "SELECT * FROM profiles WHERE profile_id = %s AND status = 'active'"
-        return db.fetch_one(sql, (profile_id,))
+        """根据 id 或 profile_id 获取档案（自动按 user_id 过滤）"""
+        col, val = ProfileDAO._resolve_id(profile_id)
+        sql = f"SELECT * FROM profiles WHERE {col} = %s AND status = 'active'"
+        return db.fetch_one(sql, (val,))
 
     @staticmethod
     def list_profiles(limit: int = 50, offset: int = 0) -> List[Dict]:
@@ -133,16 +141,18 @@ class ProfileDAO:
         if not fields:
             return False
 
-        params.append(profile_id)
-        sql = f"UPDATE profiles SET {', '.join(fields)} WHERE profile_id = %s AND status = 'active'"
+        col, val = ProfileDAO._resolve_id(profile_id)
+        params.append(val)
+        sql = f"UPDATE profiles SET {', '.join(fields)} WHERE {col} = %s AND status = 'active'"
         affected = db.execute(sql, tuple(params))
         return affected > 0
 
     @staticmethod
     def delete_profile(profile_id: str) -> bool:
-        """软删除档案（设置 status = deleted）"""
-        sql = "UPDATE profiles SET status = 'deleted' WHERE profile_id = %s AND status = 'active'"
-        affected = db.execute(sql, (profile_id,))
+        """软删除档案（设置 status = deleted），支持 id 或 profile_id"""
+        col, val = ProfileDAO._resolve_id(profile_id)
+        sql = f"UPDATE profiles SET status = 'deleted' WHERE {col} = %s AND status = 'active'"
+        affected = db.execute(sql, (val,))
         return affected > 0
 
     # ── 行业管理 ──────────────────────────────────────

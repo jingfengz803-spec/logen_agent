@@ -11,7 +11,6 @@
 import os
 import sys
 import json
-import subprocess
 from pathlib import Path
 from typing import List, Dict, Any
 
@@ -32,147 +31,56 @@ class DouyinFetcher:
         """从用户主页URL抓取视频数据"""
         # 先检查是否有已保存的数据
         json_file = os.path.join(self.tool_dir, "user_videos_data.json")
-        csv_file = os.path.join(self.tool_dir, "user_videos_data.csv")
-        
+
         # 尝试从已保存的数据读取
-        videos = self._load_saved_data(json_file, csv_file)
-        
+        videos = self._load_saved_data(json_file)
+
         if videos:
             print(f"✓ 从已保存的数据中读取到 {len(videos)} 个视频")
             return videos[:self.max_videos]
-        
-        # 如果没有保存的数据，提示用户先运行 douyin_data_tool
-        print("⚠️ 未找到已保存的视频数据")
-        print(f"\n请先运行以下命令抓取数据：")
-        print(f"cd {self.tool_dir}")
-        print(f"python runner.py")
-        print(f"\n或者将用户主页URL配置到 douyin_data_tool/config.py 的 USER_IDS 中")
-        
-        # 返回一些示例数据用于测试
-        return self._get_sample_data()
+
+        # 没有缓存，调用真正的抓取器
+        print(f"⚠️ 未找到缓存数据，开始实时抓取: {url}")
+        try:
+            sys.path.insert(0, self.tool_dir)
+            from fetch_user_videos import DouyinUserFetcher
+
+            fetcher = DouyinUserFetcher(
+                max_videos=self.max_videos,
+                enable_filter=self.enable_filter
+            )
+            videos = fetcher.fetch_from_url(url)
+
+            if videos:
+                # 保存到缓存文件
+                with open(json_file, 'w', encoding='utf-8') as f:
+                    json.dump(videos, f, ensure_ascii=False, indent=2)
+                print(f"✓ 抓取完成，已缓存 {len(videos)} 个视频到 {json_file}")
+            else:
+                print("⚠️ 抓取完成但未获取到视频数据，请检查 Cookie 是否有效")
+
+            return videos
+        except Exception as e:
+            print(f"❌ 抓取失败: {e}")
+            print("请检查: 1) Cookie 是否有效 (douyin_data_tool/config.py)  2) 网络连接是否正常")
+            return []
     
-    def _load_saved_data(self, json_file: str, csv_file: str) -> List[Dict[str, Any]]:
+    def _load_saved_data(self, json_file: str) -> List[Dict[str, Any]]:
         """从已保存的文件加载数据"""
-        videos = []
-        
-        # 优先尝试JSON文件
-        if os.path.exists(json_file):
-            try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        videos = data
-                    elif isinstance(data, dict) and 'videos' in data:
-                        videos = data['videos']
-            except:
-                pass
-        
-        return videos
-    
-    def _get_sample_data(self) -> List[Dict[str, Any]]:
-        """返回示例数据用于测试（模拟一个热门律师账号）"""
-        return [
-            {
-                "desc": "杭州老律师月入500，但今天接待了个大客户！#律师的真实日常#vlog日常",
-                "like_count": 85000,
-                "comment_count": 2800,
-                "collect_count": 6500,
-                "share_count": 1200,
-                "hashtags": ["#律师的真实日常", "#vlog日常"],
-                "music": "轻松背景音乐",
-                "duration": 18.5
-            },
-            {
-                "desc": "今天接待了一个奇葩客户，问的问题把我整不会了 #职场 #律师日常",
-                "like_count": 120000,
-                "comment_count": 4500,
-                "collect_count": 12000,
-                "share_count": 2800,
-                "hashtags": ["#职场", "#律师日常"],
-                "music": "欢快音乐",
-                "duration": 22.2
-            },
-            {
-                "desc": "青年律师的生存指南，这三点一定要记住！建议收藏 #法律咨询 #职场干货",
-                "like_count": 200000,
-                "comment_count": 8000,
-                "collect_count": 25000,
-                "share_count": 5000,
-                "hashtags": ["#法律咨询", "#职场干货"],
-                "music": "励志音乐",
-                "duration": 28.0
-            },
-            {
-                "desc": "当事人：律师你能不能帮我打赢官司？我：看情况... #律师日常 #搞笑",
-                "like_count": 95000,
-                "comment_count": 3500,
-                "collect_count": 9000,
-                "share_count": 2200,
-                "hashtags": ["#律师日常", "#搞笑"],
-                "music": "幽默音效",
-                "duration": 15.8
-            },
-            {
-                "desc": "律所实习第一天，被师傅骂哭了，但还是学到了很多 #职场新人 #律师",
-                "like_count": 68000,
-                "comment_count": 2100,
-                "collect_count": 7800,
-                "share_count": 1500,
-                "hashtags": ["#职场新人", "#律师"],
-                "music": "温馨音乐",
-                "duration": 25.0
-            },
-            {
-                "desc": "月入500的律师告诉你，为什么不要轻易打官司 #法律科普 #避坑指南",
-                "like_count": 150000,
-                "comment_count": 5500,
-                "collect_count": 18000,
-                "share_count": 3500,
-                "hashtags": ["#法律科普", "#避坑指南"],
-                "music": "讲解背景音乐",
-                "duration": 35.0
-            },
-            {
-                "desc": "客户说:你这律师怎么这么年轻？我笑了... #律师日常 #职场吐槽",
-                "like_count": 78000,
-                "comment_count": 2600,
-                "collect_count": 8500,
-                "share_count": 1800,
-                "hashtags": ["#律师日常", "#职场吐槽"],
-                "music": "轻松音乐",
-                "duration": 16.5
-            },
-            {
-                "desc": "三种情况下建议你打官司，三种情况下千万别打！#法律咨询 #维权",
-                "like_count": 180000,
-                "comment_count": 7200,
-                "collect_count": 22000,
-                "share_count": 4500,
-                "hashtags": ["#法律咨询", "#维权"],
-                "music": "专业讲解音乐",
-                "duration": 42.0
-            },
-            {
-                "desc": "律师的崩溃瞬间：当客户说对方已经承认了，结果开庭又否认 #法律 #反转",
-                "like_count": 110000,
-                "comment_count": 4100,
-                "collect_count": 14000,
-                "share_count": 3200,
-                "hashtags": ["#法律", "#反转"],
-                "music": "戏剧音乐",
-                "duration": 20.0
-            },
-            {
-                "desc": "给年轻人的建议：别轻易学法学，除非你真的热爱 #报考建议 #真实想法",
-                "like_count": 92000,
-                "comment_count": 3200,
-                "collect_count": 11000,
-                "share_count": 2500,
-                "hashtags": ["#报考建议", "#真实想法"],
-                "music": "真诚音乐",
-                "duration": 30.0
-            }
-        ]
+        if not os.path.exists(json_file):
+            return []
+
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict) and 'videos' in data:
+                    return data['videos']
+        except Exception as e:
+            print(f"⚠️ 读取缓存文件失败: {e}")
+
+        return []
 
 
 class VideoStyleAnalyzer:

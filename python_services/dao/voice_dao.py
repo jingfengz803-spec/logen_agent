@@ -50,12 +50,18 @@ class VoiceDAO:
         )
 
     @staticmethod
+    def _resolve_id(raw_id: str):
+        """根据输入判断使用 id（数字）还是 voice_id（字符串）"""
+        if raw_id.isdigit():
+            return "id", int(raw_id)
+        return "voice_id", raw_id
+
+    @staticmethod
     def get_by_voice_id(voice_id: str) -> Optional[Voice]:
-        """通过 voice_id 获取音色"""
-        sql = """
-            SELECT * FROM voices WHERE voice_id = %s
-        """
-        row = db.fetch_one(sql, (voice_id,))
+        """通过 id 或 voice_id 获取音色"""
+        col, val = VoiceDAO._resolve_id(voice_id)
+        sql = f"SELECT * FROM voices WHERE {col} = %s"
+        row = db.fetch_one(sql, (val,))
         if row:
             return Voice(**row)
         return None
@@ -98,20 +104,18 @@ class VoiceDAO:
 
     @staticmethod
     def update_status(voice_id: str, status: str, gmt_modified: str = None) -> bool:
-        """更新音色状态"""
-        sql = """
-            UPDATE voices
-            SET status = %s, gmt_modified = %s
-            WHERE voice_id = %s
-        """
-        affected = db.execute(sql, (status, gmt_modified, voice_id))
+        """更新音色状态，支持 id 或 voice_id"""
+        col, val = VoiceDAO._resolve_id(voice_id)
+        sql = f"UPDATE voices SET status = %s, gmt_modified = %s WHERE {col} = %s"
+        affected = db.execute(sql, (status, gmt_modified, val))
         return affected > 0
 
     @staticmethod
     def delete_voice(voice_id: str) -> bool:
-        """删除音色"""
-        sql = "DELETE FROM voices WHERE voice_id = %s"
-        affected = db.execute(sql, (voice_id,))
+        """删除音色，支持 id 或 voice_id"""
+        col, val = VoiceDAO._resolve_id(voice_id)
+        sql = f"DELETE FROM voices WHERE {col} = %s"
+        affected = db.execute(sql, (val,))
         return affected > 0
 
     @staticmethod

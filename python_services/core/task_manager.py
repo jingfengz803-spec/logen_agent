@@ -292,7 +292,7 @@ class TaskManager:
 
             params.append(task_id)
             sql = f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = %s"
-            db.execute(sql, tuple(params))
+            db.execute(sql, tuple(params), skip_user_filter=True)
         except Exception as e:
             logger.warning(f"更新任务状态失败: {e}")
 
@@ -304,7 +304,7 @@ class TaskManager:
                 return
 
             sql = "UPDATE tasks SET progress = %s WHERE task_id = %s"
-            db.execute(sql, (progress, task_id))
+            db.execute(sql, (progress, task_id), skip_user_filter=True)
         except Exception as e:
             logger.warning(f"更新任务进度失败: {e}")
 
@@ -341,7 +341,7 @@ class TaskManager:
 
             params.append(task_id)
             sql = f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = %s"
-            db.execute(sql, tuple(params))
+            db.execute(sql, tuple(params), skip_user_filter=True)
         except Exception as e:
             logger.warning(f"更新任务完成状态失败: {e}")
 

@@ -176,7 +176,7 @@ class TaskDAO:
             WHERE completed_at < DATE_SUB(NOW(), INTERVAL %s DAY)
             AND status IN ('success', 'failed', 'cancelled')
         """
-        return db.execute(sql, (days,))
+        return db.execute(sql, (days,), skip_user_filter=True)
 
     @staticmethod
     def sync_from_json(json_file_path: str, user_map: Dict[str, int] = None):

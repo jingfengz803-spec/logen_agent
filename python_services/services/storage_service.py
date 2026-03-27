@@ -115,7 +115,7 @@ class StorageService:
         self._uploader = None
         self._preprocessor = None  # 视频预处理器
         self._records: Dict[str, FileRecord] = {}  # file_hash -> FileRecord
-        self._records_file = settings.TEMP_DIR / "upload_records.json"
+        self._records_file = settings.temp_dir_path / "upload_records.json"
 
         # 加载上传记录
         self._load_records()
@@ -412,7 +412,7 @@ class StorageService:
             上传结果
         """
         # 保存到临时文件
-        temp_dir = settings.TEMP_DIR / "uploads"
+        temp_dir = settings.temp_dir_path / "uploads"
         temp_dir.mkdir(parents=True, exist_ok=True)
 
         import time
