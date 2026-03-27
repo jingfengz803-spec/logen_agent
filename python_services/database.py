@@ -7,6 +7,7 @@ import re
 import pymysql
 from pymysql.cursors import DictCursor
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Optional, Dict, Any
 from core.config import settings
 from core.logger import get_logger
@@ -18,8 +19,7 @@ class Database:
     """数据库连接管理类"""
 
     _pool = None
-    _current_user_id = None
-    _current_user_role = None
+    _current_user: ContextVar[Optional[dict]] = ContextVar("_current_user", default=None)
 
     # 需要进行用户数据隔离的表
     _ISOLATED_TABLES = {
@@ -31,6 +31,7 @@ class Database:
         "profiles",
         "user_industries",
         "voices",
+        "topics",
     }
 
     @classmethod
@@ -80,24 +81,24 @@ class Database:
     @classmethod
     def set_current_user(cls, user_db_id: int, role: str = "user"):
         """设置当前请求的用户上下文"""
-        cls._current_user_id = user_db_id
-        cls._current_user_role = role
+        cls._current_user.set({"id": user_db_id, "role": role})
 
     @classmethod
     def clear_current_user(cls):
         """清除当前请求的用户上下文"""
-        cls._current_user_id = None
-        cls._current_user_role = None
+        cls._current_user.set(None)
 
     @classmethod
     def is_admin(cls) -> bool:
         """判断当前用户是否为管理员"""
-        return cls._current_user_role == "admin"
+        ctx = cls._current_user.get()
+        return ctx is not None and ctx.get("role") == "admin"
 
     @classmethod
     def get_current_user_id(cls) -> Optional[int]:
         """获取当前用户 ID，未设置时返回 None"""
-        return cls._current_user_id
+        ctx = cls._current_user.get()
+        return ctx.get("id") if ctx else None
 
     # ── SQL 用户过滤 ──────────────────────────────────────────
 
@@ -128,11 +129,19 @@ class Database:
         """
         根据当前用户上下文，在查询中自动追加 user_id 过滤条件。
 
+        将 user_id 条件插入到 WHERE 子句中，参数按占位符实际位置对齐，
+        同时兼容 SELECT / UPDATE / DELETE 语句。
+
         Returns:
             (modified_sql, modified_params)
         """
         # 管理员或未设置用户 → 不过滤
-        if cls.is_admin() or cls._current_user_id is None:
+        if cls.is_admin() or cls.get_current_user_id() is None:
+            return sql, params
+
+        # INSERT / DDL 语句不需要 WHERE 过滤
+        sql_stripped = sql.strip().upper()
+        if sql_stripped.startswith(("INSERT", "CREATE", "ALTER", "DROP", "TRUNCATE")):
             return sql, params
 
         table = cls._extract_table_name(sql)
@@ -141,13 +150,36 @@ class Database:
 
         user_params = params or ()
 
-        sql_upper = sql.rstrip().upper()
-        if "WHERE" in sql_upper:
-            modified_sql = sql.rstrip() + " AND user_id = %s"
-        else:
-            modified_sql = sql.rstrip() + " WHERE user_id = %s"
+        # 找到尾部子句（ORDER BY / GROUP BY / HAVING / LIMIT）的位置
+        tail_match = re.search(
+            r"""\b(ORDER\s+BY|GROUP\s+BY|HAVING|LIMIT)\b""",
+            sql.rstrip(),
+            re.IGNORECASE,
+        )
 
-        return modified_sql, user_params + (cls._current_user_id,)
+        where_match = re.search(r"""\bWHERE\b""", sql, re.IGNORECASE)
+
+        if where_match:
+            # 在 WHERE 关键字之后立即插入 user_id = %s AND
+            insert_pos = where_match.end()
+            before_insert = sql[:insert_pos]
+            modified_sql = before_insert + " user_id = %s AND" + sql[insert_pos:]
+        elif tail_match:
+            # 没有 WHERE 但有尾部子句，在尾部子句前插入 WHERE
+            pos = tail_match.start()
+            before_insert = sql[:pos].rstrip()
+            modified_sql = before_insert + " WHERE user_id = %s " + sql[pos:]
+        else:
+            # 既没有 WHERE 也没有尾部子句，直接追加
+            before_insert = sql.rstrip()
+            modified_sql = before_insert + " WHERE user_id = %s"
+
+        # 统计插入点之前的 %s 占位符数量，将 user_id 参数插入到对应位置
+        placeholder_count = before_insert.count('%s')
+        params_list = list(user_params)
+        params_list.insert(placeholder_count, cls.get_current_user_id())
+
+        return modified_sql, tuple(params_list)
 
     @classmethod
     def is_connected(cls) -> bool:
@@ -188,17 +220,21 @@ class Database:
             conn.close()
 
     @classmethod
-    def execute(cls, sql: str, params: Optional[tuple] = None) -> int:
+    def execute(cls, sql: str, params: Optional[tuple] = None,
+                *, skip_user_filter: bool = False) -> int:
         """
         执行 SQL 语句（INSERT/UPDATE/DELETE）
 
         Args:
             sql: SQL 语句
             params: 参数
+            skip_user_filter: 是否跳过自动用户过滤（默认 False）
 
         Returns:
             影响的行数
         """
+        if not skip_user_filter:
+            sql, params = cls._apply_user_filter(sql, params)
         with cls.get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(sql, params or ())

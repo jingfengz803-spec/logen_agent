@@ -14,6 +14,7 @@ from models.request import (
 from models.response import FetchVideosResponse, TaskResponse, TaskStatus
 from services.douyin_service import DouyinService
 from core.task_manager import task_manager
+from core.task_helper import submit_background_task
 from core.logger import get_logger
 from api.deps import get_request_id
 from database import Database
@@ -138,21 +139,7 @@ async def fetch_user_videos(
                 raise
 
         # 在后台执行异步任务
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-            # 如果已有运行中的事件循环，使用 create_task
-            asyncio.create_task(task_manager.submit_task(task_id, run_fetch))
-        except RuntimeError:
-            # 没有运行中的事件循环，使用 BackgroundTasks
-            def run_in_new_loop():
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    new_loop.run_until_complete(task_manager.submit_task(task_id, run_fetch))
-                finally:
-                    new_loop.close()
-            background_tasks.add_task(run_in_new_loop)
+        submit_background_task(task_id, run_fetch, background_tasks)
 
         task = task_manager.get_task(task_id)
         return TaskResponse(
@@ -216,18 +203,7 @@ async def fetch_topic_videos(
             max_count=request.max_count
         )
 
-    import asyncio
-    try:
-        asyncio.create_task(task_manager.submit_task(task_id, run_fetch))
-    except RuntimeError:
-        def run_in_new_loop():
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            try:
-                new_loop.run_until_complete(task_manager.submit_task(task_id, run_fetch))
-            finally:
-                new_loop.close()
-        background_tasks.add_task(run_in_new_loop)
+    submit_background_task(task_id, run_fetch, background_tasks)
 
     task = task_manager.get_task(task_id)
     return TaskResponse(
@@ -259,7 +235,7 @@ async def fetch_hot_list(
     async def run_fetch():
         return await douyin_service.fetch_hot_list_async(cate_id=request.cate_id)
 
-    background_tasks.add_task(task_manager.submit_task, task_id, run_fetch())
+    submit_background_task(task_id, run_fetch, background_tasks)
 
     task = task_manager.get_task(task_id)
     return TaskResponse(

@@ -15,6 +15,7 @@ from models.response import (
 )
 from services.video_service import VideoService
 from core.task_manager import task_manager
+from core.task_helper import submit_background_task
 from core.logger import get_logger
 from api.deps import get_request_id
 from database import Database
@@ -43,6 +44,16 @@ async def generate_video(
     """
     logger.info(f"收到视频生成请求")
 
+    # 校验 URL 必须是公网可访问的链接
+    for name, url in [("video_url", request.video_url), ("audio_url", request.audio_url)]:
+        if url and (url.startswith("blob:") or url.startswith("data:")):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{name} 不能是浏览器本地链接（{url}），请先上传文件到服务器获取公网URL，或使用 /video/generate-from-files 接口直接上传文件"
+            )
+        if url and not url.startswith("http"):
+            raise HTTPException(status_code=400, detail=f"{name} 必须是 http/https 开头的公网URL")
+
     task_id = task_manager.create_task("generate_video", {
         "has_ref_image": request.ref_image_url is not None
     })
@@ -57,19 +68,7 @@ async def generate_video(
         )
 
     # 在后台执行异步任务
-    import asyncio
-    try:
-        loop = asyncio.get_running_loop()
-        asyncio.create_task(task_manager.submit_task(task_id, run_generate))
-    except RuntimeError:
-        def run_in_new_loop():
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            try:
-                new_loop.run_until_complete(task_manager.submit_task(task_id, run_generate))
-            finally:
-                new_loop.close()
-        background_tasks.add_task(run_in_new_loop)
+    submit_background_task(task_id, run_generate, background_tasks)
 
     task = task_manager.get_task(task_id)
     return TaskResponse(
@@ -242,18 +241,7 @@ async def generate_video_from_files(
                 raise
 
         # 在后台执行异步任务
-        import asyncio
-        try:
-            asyncio.create_task(task_manager.submit_task(task_id, run_generate))
-        except RuntimeError:
-            def run_in_new_loop():
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    new_loop.run_until_complete(task_manager.submit_task(task_id, run_generate))
-                finally:
-                    new_loop.close()
-            background_tasks.add_task(run_in_new_loop)
+        submit_background_task(task_id, run_generate, background_tasks)
 
         task = task_manager.get_task(task_id)
         return TaskResponse(

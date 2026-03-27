@@ -22,6 +22,7 @@ from models.response import (
 )
 from services.ai_service import AIService
 from core.task_manager import task_manager
+from core.task_helper import submit_background_task
 from core.logger import get_logger
 from api.deps import get_request_id
 
@@ -61,18 +62,7 @@ async def analyze_viral_factors(
             video_ids=request.video_ids
         )
 
-    import asyncio
-    try:
-        asyncio.create_task(task_manager.submit_task(task_id, run_analysis))
-    except RuntimeError:
-        def run_in_new_loop():
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            try:
-                new_loop.run_until_complete(task_manager.submit_task(task_id, run_analysis))
-            finally:
-                new_loop.close()
-        background_tasks.add_task(run_in_new_loop)
+    submit_background_task(task_id, run_analysis, background_tasks)
 
     task = task_manager.get_task(task_id)
     return TaskResponse(
@@ -113,18 +103,7 @@ async def analyze_style(
             dimensions=request.analysis_dimensions
         )
 
-    import asyncio
-    try:
-        asyncio.create_task(task_manager.submit_task(task_id, run_analysis))
-    except RuntimeError:
-        def run_in_new_loop():
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            try:
-                new_loop.run_until_complete(task_manager.submit_task(task_id, run_analysis))
-            finally:
-                new_loop.close()
-        background_tasks.add_task(run_in_new_loop)
+    submit_background_task(task_id, run_analysis, background_tasks)
 
     task = task_manager.get_task(task_id)
     return TaskResponse(
@@ -145,39 +124,54 @@ async def generate_script(
     """
     生成TTS脚本
 
-    根据参考风格数据和新主题生成视频脚本，包括：
+    根据参考风格数据、档案信息和新主题生成视频脚本，包括：
     - 视频标题
     - 视频描述
     - 话题标签
     - 发布文案
     - 完整台词（含分段）
+
+    支持两种模式：
+    1. 有视频分析结果：style_analysis + viral_analysis + topic → 生成脚本
+    2. 仅档案数据：profile_id + topic → 直接根据档案生成脚本
     """
-    logger.info(f"收到脚本生成请求: {request.topic}")
+    logger.info(f"收到脚本生成请求: {request.topic}, profile_id={request.profile_id}")
+
+    # 如果提供了 profile_id，获取档案数据
+    profile = None
+    if request.profile_id:
+        from dao.profile_dao import ProfileDAO
+        from database import db as _db
+        col, val = ProfileDAO._resolve_id(str(request.profile_id))
+        profile = _db.fetch_one(
+            f"SELECT * FROM profiles WHERE {col} = %s AND status = 'active'",
+            (val,)
+        )
+        if not profile:
+            raise HTTPException(status_code=404, detail="档案不存在")
+
+    # 如果没有视频分析结果也没有档案，则报错
+    if not request.style_analysis and not request.viral_analysis and not profile:
+        raise HTTPException(
+            status_code=400,
+            detail="请提供 style_analysis/viral_analysis 或 profile_id"
+        )
 
     task_id = task_manager.create_task("generate_script", {
-        "topic": request.topic
+        "topic": request.topic,
+        "profile_id": request.profile_id
     })
 
     async def run_generation():
         return await ai_service.generate_script_async(
-            style_analysis=request.style_analysis,
-            viral_analysis=request.viral_analysis,
+            style_analysis=request.style_analysis or {},
+            viral_analysis=request.viral_analysis or {},
             topic=request.topic,
-            target_duration=request.target_duration
+            target_duration=request.target_duration,
+            profile=profile
         )
 
-    import asyncio
-    try:
-        asyncio.create_task(task_manager.submit_task(task_id, run_generation))
-    except RuntimeError:
-        def run_in_new_loop():
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            try:
-                new_loop.run_until_complete(task_manager.submit_task(task_id, run_generation))
-            finally:
-                new_loop.close()
-        background_tasks.add_task(run_in_new_loop)
+    submit_background_task(task_id, run_generation, background_tasks)
 
     task = task_manager.get_task(task_id)
     return TaskResponse(
@@ -221,18 +215,7 @@ async def full_analysis(
             target_duration=request.target_duration
         )
 
-    import asyncio
-    try:
-        asyncio.create_task(task_manager.submit_task(task_id, run_analysis))
-    except RuntimeError:
-        def run_in_new_loop():
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            try:
-                new_loop.run_until_complete(task_manager.submit_task(task_id, run_analysis))
-            finally:
-                new_loop.close()
-        background_tasks.add_task(run_in_new_loop)
+    submit_background_task(task_id, run_analysis, background_tasks)
 
     task = task_manager.get_task(task_id)
     return TaskResponse(

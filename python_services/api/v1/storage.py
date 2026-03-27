@@ -18,6 +18,7 @@ from models.response import (
 )
 from services.storage_service import get_storage_service, StorageService
 from core.task_manager import task_manager
+from core.task_helper import submit_background_task
 from core.logger import get_logger
 from api.deps import get_request_id
 from datetime import datetime
@@ -77,24 +78,10 @@ async def upload_file(
                 raise
 
         if background_tasks:
-            # 使用 asyncio.create_task 而不是 background_tasks.add_task
-            import asyncio
-            try:
-                asyncio.create_task(task_manager.submit_task(task_id, run_upload))
-            except RuntimeError:
-                # 如果没有运行中的事件循环，使用 background_tasks
-                def run_in_new_loop():
-                    new_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(new_loop)
-                    try:
-                        new_loop.run_until_complete(task_manager.submit_task(task_id, run_upload))
-                    finally:
-                        new_loop.close()
-                background_tasks.add_task(run_in_new_loop)
+            submit_background_task(task_id, run_upload, background_tasks)
         else:
             # 同步执行（用于测试）
             result = await run_upload()
-            task_manager.complete_task(task_id, result)
 
         task = task_manager.get_task(task_id)
         return TaskResponse(
@@ -153,19 +140,7 @@ async def upload_by_path(
                 raise
 
         # 使用 asyncio.create_task 而不是 background_tasks.add_task
-        import asyncio
-        try:
-            asyncio.create_task(task_manager.submit_task(task_id, run_upload))
-        except RuntimeError:
-            # 如果没有运行中的事件循环，使用 background_tasks
-            def run_in_new_loop():
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    new_loop.run_until_complete(task_manager.submit_task(task_id, run_upload))
-                finally:
-                    new_loop.close()
-            background_tasks.add_task(run_in_new_loop)
+        submit_background_task(task_id, run_upload, background_tasks)
 
         task = task_manager.get_task(task_id)
         return TaskResponse(
@@ -378,18 +353,7 @@ async def batch_upload_files(
                     raise
 
             if background_tasks:
-                import asyncio
-                try:
-                    asyncio.create_task(task_manager.submit_task(task_id, run_upload))
-                except RuntimeError:
-                    def run_in_new_loop():
-                        new_loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(new_loop)
-                        try:
-                            new_loop.run_until_complete(task_manager.submit_task(task_id, run_upload))
-                        finally:
-                            new_loop.close()
-                    background_tasks.add_task(run_in_new_loop)
+                submit_background_task(task_id, run_upload, background_tasks)
 
             task_ids.append(task_id)
 

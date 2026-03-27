@@ -20,6 +20,7 @@ from models.response import (
 )
 from services.tts_service import TTSService
 from core.task_manager import task_manager
+from core.task_helper import submit_background_task
 from core.logger import get_logger
 from api.deps import get_request_id, require_admin
 from database import Database
@@ -36,7 +37,7 @@ tts_service = TTSService()
 async def create_voice_from_file(
     file: UploadFile = File(..., description="音色音频文件（支持 mp3, wav, m4a 等格式）"),
     prefix: str = Form("myvoice", description="音色前缀", max_length=20),
-    model: str = Form("cosyvoice-v3.5-flash", description="TTS模型"),
+    model: str = Form("cosyvoice-v3.5-plus", description="TTS模型"),
     preview_text: str = Form("你好，这是我的音色。", description="试听文本"),
     auto_upload_oss: bool = Form(True, description="是否自动上传试听音频到OSS"),
     background_tasks: BackgroundTasks = None,
@@ -60,7 +61,7 @@ async def create_voice_from_file(
     请求参数：
     - file: 音频文件（multipart/form-data）
     - prefix: 音色前缀（默认: myvoice）
-    - model: TTS模型（默认: cosyvoice-v3.5-flash）
+    - model: TTS模型（默认: cosyvoice-v3.5-plus）
     - preview_text: 试听文本（默认: "你好，这是我的音色。"）
     - auto_upload_oss: 是否上传试听音频到OSS（默认: True）
 
@@ -144,18 +145,7 @@ async def create_voice_from_file(
                 raise
 
         # 在后台执行异步任务
-        import asyncio
-        try:
-            asyncio.create_task(task_manager.submit_task(task_id, run_create))
-        except RuntimeError:
-            def run_in_new_loop():
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    new_loop.run_until_complete(task_manager.submit_task(task_id, run_create))
-                finally:
-                    new_loop.close()
-            background_tasks.add_task(run_in_new_loop)
+        submit_background_task(task_id, run_create, background_tasks)
 
         task = task_manager.get_task(task_id)
         return TaskResponse(
@@ -298,7 +288,7 @@ async def create_voice_from_url(
 
     - **audio_url**: 音色音频的公网URL（OSS URL）
     - **prefix**: 音色前缀/名称
-    - **model**: TTS模型（默认: cosyvoice-v3.5-flash）
+    - **model**: TTS模型（默认: cosyvoice-v3.5-plus）
     - **wait_ready**: 是否等待音色就绪（默认: True）
 
     返回：task_id，轮询 /task/{task_id} 获取结果
@@ -335,18 +325,7 @@ async def create_voice_from_url(
                 )
             return result
 
-        import asyncio
-        try:
-            asyncio.create_task(task_manager.submit_task(task_id, run_create))
-        except RuntimeError:
-            def run_in_new_loop():
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    new_loop.run_until_complete(task_manager.submit_task(task_id, run_create))
-                finally:
-                    new_loop.close()
-            background_tasks.add_task(run_in_new_loop)
+        submit_background_task(task_id, run_create, background_tasks)
 
         task = task_manager.get_task(task_id)
         return TaskResponse(
@@ -395,18 +374,7 @@ async def text_to_speech(
             auto_upload_oss=True  # 自动上传到OSS
         )
 
-    import asyncio
-    try:
-        asyncio.create_task(task_manager.submit_task(task_id, run_speech))
-    except RuntimeError:
-        def run_in_new_loop():
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            try:
-                new_loop.run_until_complete(task_manager.submit_task(task_id, run_speech))
-            finally:
-                new_loop.close()
-        background_tasks.add_task(run_in_new_loop)
+    submit_background_task(task_id, run_speech, background_tasks)
 
     task = task_manager.get_task(task_id)
     return TaskResponse(
@@ -448,18 +416,7 @@ async def text_segments_to_speech(
             output_format=request.output_format
         )
 
-    import asyncio
-    try:
-        asyncio.create_task(task_manager.submit_task(task_id, run_speech))
-    except RuntimeError:
-        def run_in_new_loop():
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            try:
-                new_loop.run_until_complete(task_manager.submit_task(task_id, run_speech))
-            finally:
-                new_loop.close()
-        background_tasks.add_task(run_in_new_loop)
+    submit_background_task(task_id, run_speech, background_tasks)
 
     task = task_manager.get_task(task_id)
     return TaskResponse(
@@ -503,18 +460,7 @@ async def script_to_speech(
             model=request.model
         )
 
-    import asyncio
-    try:
-        asyncio.create_task(task_manager.submit_task(task_id, run_speech))
-    except RuntimeError:
-        def run_in_new_loop():
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            try:
-                new_loop.run_until_complete(task_manager.submit_task(task_id, run_speech))
-            finally:
-                new_loop.close()
-        background_tasks.add_task(run_in_new_loop)
+    submit_background_task(task_id, run_speech, background_tasks)
 
     task = task_manager.get_task(task_id)
     return TaskResponse(

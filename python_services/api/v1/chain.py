@@ -13,6 +13,7 @@ from services.ai_service import AIService
 from services.tts_service import TTSService
 from services.video_service import VideoService
 from core.task_manager import task_manager
+from core.task_helper import submit_background_task
 from core.logger import get_logger
 from api.deps import get_request_id
 
@@ -186,18 +187,7 @@ async def analyze_from_fetch_task(
 
             return result
 
-        import asyncio
-        try:
-            asyncio.create_task(task_manager.submit_task(task_id, run_analysis))
-        except RuntimeError:
-            def run_in_new_loop():
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    new_loop.run_until_complete(task_manager.submit_task(task_id, run_analysis))
-                finally:
-                    new_loop.close()
-            background_tasks.add_task(run_in_new_loop)
+        submit_background_task(task_id, run_analysis, background_tasks)
 
         task = task_manager.get_task(task_id)
         return TaskResponse(
@@ -283,18 +273,7 @@ async def generate_script_from_analysis(
                 target_duration=request.target_duration
             )
 
-        import asyncio
-        try:
-            asyncio.create_task(task_manager.submit_task(task_id, run_generation))
-        except RuntimeError:
-            def run_in_new_loop():
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    new_loop.run_until_complete(task_manager.submit_task(task_id, run_generation))
-                finally:
-                    new_loop.close()
-            background_tasks.add_task(run_in_new_loop)
+        submit_background_task(task_id, run_generation, background_tasks)
 
         task = task_manager.get_task(task_id)
         return TaskResponse(
@@ -390,18 +369,7 @@ async def tts_from_script(
             }
             return result
 
-        import asyncio
-        try:
-            asyncio.create_task(task_manager.submit_task(task_id, run_tts))
-        except RuntimeError:
-            def run_in_new_loop():
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    new_loop.run_until_complete(task_manager.submit_task(task_id, run_tts))
-                finally:
-                    new_loop.close()
-            background_tasks.add_task(run_in_new_loop)
+        submit_background_task(task_id, run_tts, background_tasks)
 
         task = task_manager.get_task(task_id)
         return TaskResponse(
@@ -521,18 +489,7 @@ async def tts_from_analysis(
                 }
             }
 
-        import asyncio
-        try:
-            asyncio.create_task(task_manager.submit_task(task_id, run_tts_with_script))
-        except RuntimeError:
-            def run_in_new_loop():
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    new_loop.run_until_complete(task_manager.submit_task(task_id, run_tts_with_script))
-                finally:
-                    new_loop.close()
-            background_tasks.add_task(run_in_new_loop)
+        submit_background_task(task_id, run_tts_with_script, background_tasks)
 
         task = task_manager.get_task(task_id)
         return TaskResponse(
@@ -634,18 +591,7 @@ async def video_from_tts(
             }
             return result
 
-        import asyncio
-        try:
-            asyncio.create_task(task_manager.submit_task(task_id, run_video))
-        except RuntimeError:
-            def run_in_new_loop():
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    new_loop.run_until_complete(task_manager.submit_task(task_id, run_video))
-                finally:
-                    new_loop.close()
-            background_tasks.add_task(run_in_new_loop)
+        submit_background_task(task_id, run_video, background_tasks)
 
         task = task_manager.get_task(task_id)
         return TaskResponse(
@@ -807,18 +753,7 @@ async def generate_from_profile(
             task_manager.update_progress(task_id, 100, "完成")
             return result_data
 
-        import asyncio
-        try:
-            asyncio.create_task(task_manager.submit_task(task_id, run_generation))
-        except RuntimeError:
-            def run_in_new_loop():
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    new_loop.run_until_complete(task_manager.submit_task(task_id, run_generation))
-                finally:
-                    new_loop.close()
-            background_tasks.add_task(run_in_new_loop)
+        submit_background_task(task_id, run_generation, background_tasks)
 
         task = task_manager.get_task(task_id)
         return TaskResponse(
