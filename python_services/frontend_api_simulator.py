@@ -254,7 +254,7 @@ if __name__ == "__main__":
     # 确保服务已启动！
     try:
         requests.get(f"{BASE_URL}/health", timeout=2)
-    except:
+    except Exception:
         print(f"错误: 无法连接到 {BASE_URL}")
         print("请先启动服务: python python_services/run_server.py")
         exit(1)

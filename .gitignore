@@ -76,6 +76,7 @@ nul
 .pytest_cache/
 .coverage
 htmlcov/
+python_services/temp/
 
 # ------------------- OS -------------------
 Thumbs.db

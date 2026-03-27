@@ -29,7 +29,7 @@ def print_response(response):
     import json
     try:
         print(f"    数据: {json.dumps(response.json(), ensure_ascii=False, indent=6)}")
-    except:
+    except Exception:
         print(f"    数据: {response.text[:200]}")
 
 
@@ -333,7 +333,7 @@ def module_douyin_fetch():
                             print(f"  ⚠️  警告: 字数不足 {min_target - actual_count} 字")
                         else:
                             print(f"  ✅ 字数达标")
-                    except:
+                    except (ValueError, IndexError):
                         pass
 
             segments = tts_data.get("分段", [])
@@ -825,7 +825,7 @@ def module_workflow_guided():
                     if 0 <= idx < len(available):
                         voice_id = available[idx].get("voice_id")
                         print(f"  ✓ 已选择音色: {available[idx].get('prefix')}")
-                except:
+                except (ValueError, IndexError):
                     pass
 
         if not voice_id:
@@ -965,7 +965,7 @@ if __name__ == "__main__":
     # 检查服务
     try:
         requests.get(BASE_URL, timeout=2)
-    except:
+    except Exception:
         print(f"错误: 无法连接到 {BASE_URL}")
         print("请先启动服务: cd python_services && python main.py")
         exit(1)
