@@ -26,6 +26,24 @@ class TTSService:
         self.executor = ThreadPoolExecutor(max_workers=3)
         self._cosyvoice_client = None
 
+    async def _run_in_executor(self, func, label="操作"):
+        """在线程池中执行同步函数，统一日志和异常处理"""
+        def _wrapper():
+            try:
+                return func()
+            except Exception as e:
+                logger.error(f"{label}失败: {e}")
+                raise
+        return await asyncio.get_running_loop().run_in_executor(self.executor, _wrapper)
+
+    @staticmethod
+    def _sync_await(coro):
+        """在线程池线程中运行异步协程（无事件循环时自动创建新的）"""
+        try:
+            return asyncio.get_event_loop().run_until_complete(coro)
+        except RuntimeError:
+            return asyncio.run(coro)
+
     @property
     def cosyvoice_client(self):
         """延迟初始化CosyVoice客户端 - 每次都创建新实例以避免 monkey-patch 缓存问题"""
@@ -40,8 +58,7 @@ class TTSService:
         self,
         audio_url: str,
         prefix: str = "myvoice",
-        model: str = "cosyvoice-v3.5-flash",
-        language_hints: Optional[List[str]] = None,
+        model: str = "cosyvoice-v3.5-plus",
         wait_ready: bool = True
     ) -> Dict[str, Any]:
         """
@@ -51,74 +68,60 @@ class TTSService:
             audio_url: 音色音频URL
             prefix: 音色前缀
             model: TTS模型
-            language_hints: 语言提示
             wait_ready: 是否等待就绪
 
         Returns:
             创建结果
         """
-        loop = asyncio.get_event_loop()
-
         def _create():
-            try:
-                result = self.cosyvoice_client.create_voice(
-                    audio_url=audio_url,
-                    prefix=prefix,
-                    model=model,
-                    language_hints=language_hints,
-                    wait_ready=wait_ready
-                )
+            result = self.cosyvoice_client.create_voice(
+                audio_url=audio_url,
+                prefix=prefix,
+                model=model,
+                wait_ready=wait_ready
+            )
 
-                voice_id = result.get("voice_id")
+            voice_id = result.get("voice_id")
 
-                # 保存到本地 voices.txt 文件
-                if voice_id:
-                    try:
-                        from pathlib import Path
-                        voices_file = Path(self.longgraph_dir) / "data" / "voices.txt"
-                        voices_file.parent.mkdir(parents=True, exist_ok=True)
+            # 保存到本地 voices.txt 文件
+            if voice_id:
+                try:
+                    from pathlib import Path
+                    voices_file = Path(self.longgraph_dir) / "data" / "voices.txt"
+                    voices_file.parent.mkdir(parents=True, exist_ok=True)
 
-                        from datetime import datetime
-                        timestamp = datetime.now().strftime("%Y-%m-%d")
+                    from datetime import datetime
+                    timestamp = datetime.now().strftime("%Y-%m-%d")
 
-                        with open(voices_file, "a", encoding="utf-8") as f:
-                            f.write(f"{voice_id} | {prefix} | {timestamp}\n")
+                    with open(voices_file, "a", encoding="utf-8") as f:
+                        f.write(f"{voice_id} | {prefix} | {timestamp}\n")
 
-                        logger.info(f"音色ID已保存到 voices.txt: {voice_id}")
-                    except Exception as e:
-                        logger.warning(f"保存音色ID失败: {e}")
+                    logger.info(f"音色ID已保存到 voices.txt: {voice_id}")
+                except Exception as e:
+                    logger.warning(f"保存音色ID失败: {e}")
 
-                return {
-                    "voice_id": voice_id,
-                    "prefix": result.get("prefix", prefix),
-                    "model": result.get("model", model),
-                    "status": result.get("status", "DEPLOYING")
-                }
+            return {
+                "voice_id": voice_id,
+                "prefix": result.get("prefix", prefix),
+                "model": result.get("model", model),
+                "status": result.get("status", "DEPLOYING")
+            }
 
-            except Exception as e:
-                logger.error(f"创建音色失败: {e}")
-                raise
-
-        return await loop.run_in_executor(self.executor, _create)
+        return await self._run_in_executor(_create, "创建音色")
 
     async def list_voices_async(self) -> List[Dict[str, Any]]:
         """异步获取音色列表"""
-        loop = asyncio.get_event_loop()
-
         def _list():
             try:
-                voices = self.cosyvoice_client.list_voices()
-                return voices
+                return self.cosyvoice_client.list_voices()
             except Exception as e:
                 logger.error(f"获取音色列表失败: {e}")
                 return []
 
-        return await loop.run_in_executor(self.executor, _list)
+        return await self._run_in_executor(_list, "获取音色列表")
 
     async def get_voice_async(self, voice_id: str) -> Optional[Dict[str, Any]]:
         """异步查询单个音色"""
-        loop = asyncio.get_event_loop()
-
         def _get():
             try:
                 return self.cosyvoice_client.query_voice(voice_id)
@@ -126,14 +129,15 @@ class TTSService:
                 logger.error(f"查询音色失败: {e}")
                 return None
 
-        return await loop.run_in_executor(self.executor, _get)
+        return await self._run_in_executor(_get, "查询音色")
 
     async def speech_async(
         self,
         text: str,
         voice_id: str,
         model: Optional[str] = None,
-        output_format: str = "mp3"
+        output_format: str = "mp3",
+        auto_upload_oss: bool = True
     ) -> Dict[str, Any]:
         """
         异步语音合成
@@ -147,20 +151,19 @@ class TTSService:
         Returns:
             合成结果
         """
-        loop = asyncio.get_event_loop()
-
         def _speech():
             try:
                 # 生成输出路径
                 from pathlib import Path
-                output_dir = settings.OUTPUT_DIR / "audio"
-                output_dir.mkdir(parents=True, exist_ok=True)
                 import time
+
+                # 使用 Path 对象进行路径操作
+                base_dir = Path(settings.OUTPUT_DIR)
+                output_dir = base_dir / "audio"
+                output_dir.mkdir(parents=True, exist_ok=True)
+
                 timestamp = int(time.time() * 1000)
                 output_path = output_dir / f"tts_{timestamp}.{output_format}"
-
-                # 调试：记录传递的参数
-                # logger.info(f"[TTS] 调用参数: text='{text}', voice_id='{voice_id[:30]}...', model='{model}'")
 
                 output_path = self.cosyvoice_client.speech(
                     text=text,
@@ -174,7 +177,7 @@ class TTSService:
                 # 估算时长（假设平均 16kbps）
                 estimated_duration = file_size / 16000 if file_size > 0 else 0
 
-                return {
+                result = {
                     "audio_path": str(output_path),
                     "text": text,
                     "format": output_format,
@@ -182,11 +185,26 @@ class TTSService:
                     "duration": estimated_duration
                 }
 
+                # 自动上传到OSS
+                if auto_upload_oss:
+                    try:
+                        from services.storage_service import get_storage_service
+                        storage = get_storage_service()
+                        upload_result = self._sync_await(
+                            storage.upload_file_async(file_path=str(output_path), file_type="audio")
+                        )
+                        result["audio_url"] = upload_result.get("oss_url")
+                        logger.info(f"音频已自动上传到OSS: {upload_result.get('oss_url')}")
+                    except Exception as e:
+                        logger.warning(f"自动上传音频到OSS失败: {e}")
+
+                return result
+
             except Exception as e:
                 logger.error(f"语音合成失败: {e}")
                 raise
 
-        return await loop.run_in_executor(self.executor, _speech)
+        return await self._run_in_executor(_speech, "语音合成")
 
     async def speech_segments_async(
         self,
@@ -207,15 +225,13 @@ class TTSService:
         Returns:
             合成结果
         """
-        loop = asyncio.get_event_loop()
-
         def _speech():
             try:
                 result = self.cosyvoice_client.speech_from_segments(
                     segments=segments,
-                    voice_id=voice_id,
+                    voice=voice_id,
                     model=model,
-                    output_format=output_format
+                    output_dir=f"data/audio_segments_{int(time.time() * 1000)}"
                 )
 
                 return {
@@ -228,14 +244,13 @@ class TTSService:
                 logger.error(f"分段语音合成失败: {e}")
                 raise
 
-        return await loop.run_in_executor(self.executor, _speech)
+        return await self._run_in_executor(_speech, "分段语音合成")
 
     async def create_voice_with_preview_async(
         self,
         audio_url: str,
         prefix: str = "myvoice",
-        model: str = "cosyvoice-v3.5-flash",
-        language_hints: Optional[List[str]] = None,
+        model: str = "cosyvoice-v3.5-plus",
         preview_text: str = "你好，这是我的音色。",
         auto_upload_oss: bool = True
     ) -> Dict[str, Any]:
@@ -246,116 +261,93 @@ class TTSService:
             audio_url: 音色音频URL
             prefix: 音色前缀
             model: TTS模型
-            language_hints: 语言提示
             preview_text: 试听文本
             auto_upload_oss: 是否自动上传试听音频到OSS
 
         Returns:
             创建结果，包含voice_id和试听音频URL
         """
-        loop = asyncio.get_event_loop()
-
         def _create_with_preview():
+            # 步骤1: 创建音色
+            logger.info(f"开始创建音色: prefix={prefix}, model={model}")
+            voice_result = self.cosyvoice_client.create_voice(
+                audio_url=audio_url,
+                prefix=prefix,
+                model=model,
+                wait_ready=True
+            )
+
+            voice_id = voice_result.get("voice_id")
+            status = voice_result.get("status", "DEPLOYING")
+
+            if not voice_id:
+                raise Exception("创建音色失败：未返回voice_id")
+
+            # 保存到本地 voices.txt 文件
             try:
-                # 步骤1: 创建音色
-                logger.info(f"开始创建音色: prefix={prefix}, model={model}")
-                voice_result = self.cosyvoice_client.create_voice(
-                    audio_url=audio_url,
-                    prefix=prefix,
-                    model=model,
-                    language_hints=language_hints,
-                    wait_ready=True
-                )
+                from pathlib import Path
+                voices_file = Path(self.longgraph_dir) / "data" / "voices.txt"
+                voices_file.parent.mkdir(parents=True, exist_ok=True)
 
-                voice_id = voice_result.get("voice_id")
-                status = voice_result.get("status", "DEPLOYING")
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y-%m-%d")
 
-                if not voice_id:
-                    raise Exception("创建音色失败：未返回voice_id")
+                with open(voices_file, "a", encoding="utf-8") as f:
+                    f.write(f"{voice_id} | {prefix} | {timestamp}\n")
 
-                # 保存到本地 voices.txt 文件
-                try:
-                    from pathlib import Path
-                    voices_file = Path(self.longgraph_dir) / "data" / "voices.txt"
-                    voices_file.parent.mkdir(parents=True, exist_ok=True)
-
-                    from datetime import datetime
-                    timestamp = datetime.now().strftime("%Y-%m-%d")
-
-                    with open(voices_file, "a", encoding="utf-8") as f:
-                        f.write(f"{voice_id} | {prefix} | {timestamp}\n")
-
-                    logger.info(f"音色ID已保存到 voices.txt: {voice_id}")
-                except Exception as e:
-                    logger.warning(f"保存音色ID失败: {e}")
-
-                # 步骤2: 如果音色就绪，生成试听音频
-                preview_audio_url = None
-                if status == "OK":
-                    logger.info(f"音色已就绪，生成试听音频...")
-                    try:
-                        # 生成试听音频
-                        from pathlib import Path
-                        output_dir = settings.OUTPUT_DIR / "audio" / "preview"
-                        output_dir.mkdir(parents=True, exist_ok=True)
-                        import time
-                        timestamp = int(time.time() * 1000)
-                        preview_path = output_dir / f"preview_{prefix}_{timestamp}.mp3"
-
-                        self.cosyvoice_client.speech(
-                            text=preview_text,
-                            voice=voice_id,
-                            model=model,
-                            output_path=str(preview_path)
-                        )
-
-                        # 上传到OSS
-                        if auto_upload_oss:
-                            from services.storage_service import get_storage_service
-                            storage = get_storage_service()
-
-                            # 同步上传
-                            import asyncio
-                            try:
-                                upload_result = asyncio.get_event_loop().run_until_complete(
-                                    storage.upload_file_async(
-                                        file_path=str(preview_path),
-                                        file_type="audio"
-                                    )
-                                )
-                            except RuntimeError:
-                                upload_result = asyncio.run(
-                                    storage.upload_file_async(
-                                        file_path=str(preview_path),
-                                        file_type="audio"
-                                    )
-                                )
-
-                            preview_audio_url = upload_result.get("oss_url")
-                            logger.info(f"试听音频已上传到OSS: {preview_audio_url}")
-                        else:
-                            # 返回本地路径
-                            preview_audio_url = str(preview_path)
-
-                    except Exception as e:
-                        logger.error(f"生成试听音频失败: {e}")
-                        # 试听音频生成失败不影响音色创建
-
-                return {
-                    "voice_id": voice_id,
-                    "prefix": prefix,
-                    "model": model,
-                    "status": status,
-                    "preview_text": preview_text,
-                    "preview_audio_url": preview_audio_url,
-                    "is_available": status == "OK"
-                }
-
+                logger.info(f"音色ID已保存到 voices.txt: {voice_id}")
             except Exception as e:
-                logger.error(f"创建音色（含试听）失败: {e}")
-                raise
+                logger.warning(f"保存音色ID失败: {e}")
 
-        return await loop.run_in_executor(self.executor, _create_with_preview)
+            # 步骤2: 如果音色就绪，生成试听音频
+            preview_audio_url = None
+            if status == "OK":
+                logger.info(f"音色已就绪，生成试听音频...")
+                try:
+                    # 生成试听音频
+                    from pathlib import Path
+                    base_dir = Path(settings.OUTPUT_DIR)
+                    output_dir = base_dir / "audio" / "preview"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    import time
+                    timestamp = int(time.time() * 1000)
+                    preview_path = output_dir / f"preview_{prefix}_{timestamp}.mp3"
+
+                    self.cosyvoice_client.speech(
+                        text=preview_text,
+                        voice=voice_id,
+                        model=model,
+                        output_path=str(preview_path)
+                    )
+
+                    # 上传到OSS
+                    if auto_upload_oss:
+                        from services.storage_service import get_storage_service
+                        storage = get_storage_service()
+                        upload_result = self._sync_await(
+                            storage.upload_file_async(file_path=str(preview_path), file_type="audio")
+                        )
+                        preview_audio_url = upload_result.get("oss_url")
+                        logger.info(f"试听音频已上传到OSS: {preview_audio_url}")
+                    else:
+                        # 返回本地路径
+                        preview_audio_url = str(preview_path)
+
+                except Exception as e:
+                    logger.error(f"生成试听音频失败: {e}")
+                    # 试听音频生成失败不影响音色创建
+
+            return {
+                "voice_id": voice_id,
+                "prefix": prefix,
+                "model": model,
+                "status": status,
+                "preview_text": preview_text,
+                "preview_audio_url": preview_audio_url,
+                "is_available": status == "OK"
+            }
+
+        return await self._run_in_executor(_create_with_preview, "创建音色（含试听）")
 
     async def script_to_speech_async(
         self,
@@ -380,17 +372,17 @@ class TTSService:
         Returns:
             合成结果，包含 OSS URL（如果 auto_upload_oss=True）
         """
-        loop = asyncio.get_event_loop()
-
         def _speech():
             try:
                 # 生成输出路径
                 from pathlib import Path
-                output_dir = settings.OUTPUT_DIR / "audio"
-                output_dir.mkdir(parents=True, exist_ok=True)
                 import time
+
+                base_dir = Path(settings.OUTPUT_DIR)
+                output_dir = base_dir / "audio"
+                output_dir.mkdir(parents=True, exist_ok=True)
                 timestamp = int(time.time() * 1000)
-                
+
                 if progress_callback:
                     progress_callback(20, "合成完整音频...")
 
@@ -398,7 +390,7 @@ class TTSService:
                 full_audio_path = output_dir / f"full_{timestamp}.{output_format}"
                 full_result = self.cosyvoice_client.speech(
                     text=full_text,
-                    voice_id=voice_id,
+                    voice=voice_id,
                     model=model,
                     output_path=str(full_audio_path)
                 )
@@ -410,7 +402,7 @@ class TTSService:
                 segments_dir = output_dir / "segments"
                 segments_result = self.cosyvoice_client.speech_from_segments(
                     segments=segments,
-                    voice_id=voice_id,
+                    voice=voice_id,
                     model=model,
                     output_dir=str(segments_dir)
                 )
@@ -426,27 +418,16 @@ class TTSService:
                     if progress_callback:
                         progress_callback(80, "上传音频到 OSS...")
 
-                    # 延迟导入避免循环依赖
                     from services.storage_service import get_storage_service
                     storage = get_storage_service()
 
                     # 上传完整音频
                     try:
-                        upload_result = storage.upload_file_async(
-                            file_path=str(full_result),
-                            file_type="audio"
+                        upload_result = self._sync_await(
+                            storage.upload_file_async(file_path=str(full_result), file_type="audio")
                         )
-                        # 这里需要在事件循环中运行
-                        import asyncio
-                        try:
-                            upload_result = asyncio.get_event_loop().run_until_complete(upload_result)
-                        except RuntimeError:
-                            # 如果没有运行中的事件循环，创建一个新的
-                            upload_result = asyncio.run(upload_result)
-
                         result["full_audio_oss_url"] = upload_result.get("oss_url")
                         result["full_audio_hash"] = upload_result.get("file_hash")
-
                         logger.info(f"完整音频已上传到 OSS: {upload_result.get('oss_url')}")
                     except Exception as e:
                         logger.warning(f"上传完整音频到 OSS 失败: {e}")
@@ -455,15 +436,9 @@ class TTSService:
                     segment_urls = []
                     for i, seg_path in enumerate(segments_result.get("segments", [])):
                         try:
-                            upload_result = storage.upload_file_async(
-                                file_path=str(seg_path),
-                                file_type="audio"
+                            upload_result = self._sync_await(
+                                storage.upload_file_async(file_path=str(seg_path), file_type="audio")
                             )
-                            try:
-                                upload_result = asyncio.get_event_loop().run_until_complete(upload_result)
-                            except RuntimeError:
-                                upload_result = asyncio.run(upload_result)
-
                             segment_urls.append({
                                 "index": i,
                                 "local_path": str(seg_path),
@@ -481,4 +456,4 @@ class TTSService:
                 logger.error(f"TTS脚本合成失败: {e}")
                 raise
 
-        return await loop.run_in_executor(self.executor, _speech)
+        return await self._run_in_executor(_speech, "TTS脚本合成")
