@@ -37,13 +37,21 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         """处理请求并记录日志"""
-        # 生成请求ID
-        request_id = request.headers.get("X-Request-ID", "unknown")
+        import uuid
+
+        # 优先使用前端传入的 request_id，否则自动生成
+        request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:8]
+
+        # 获取客户端 IP
+        client_ip = request.client.host if request.client else "-"
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            client_ip = forwarded.split(",")[0].strip()
 
         # 记录请求信息
         logger.info(
             f"Request: {request.method} {request.url.path} "
-            f"[{request_id}]"
+            f"[{request_id}] {client_ip}"
         )
 
         # 处理请求
